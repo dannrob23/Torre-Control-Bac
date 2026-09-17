@@ -1,0 +1,16 @@
+# ---------------------------------------------------------------------------
+# Torre de Control SLA - dependencias para Streamlit Cloud
+#
+# Se instalan automaticamente al desplegar. Solo lo que el DASHBOARD necesita:
+# nada de tkinter, plyer ni PowerShell (eso es de escritorio Windows).
+# ---------------------------------------------------------------------------
+
+# Nucleo: lectura del Excel y calculo de SLA
+pandas>=2.0,<3.0
+openpyxl>=3.1,<4.0
+
+# Dashboard web
+streamlit>=1.30
+
+# Envio a Telegram (opcional: si no se configura, el boton no aparece)
+requests>=2.31

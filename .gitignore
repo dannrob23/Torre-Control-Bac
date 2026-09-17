@@ -1,0 +1,22 @@
+# Entorno virtual
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# DATOS REALES - nunca subir
+*.xlsx
+!data/*EJEMPLO*.xlsx
+historial.db
+*.log
+
+# CREDENCIALES - nunca subir
+.streamlit/secrets.toml
+config_telegram.json
+menciones.json
+
+# Streamlit
+.streamlit/secrets.toml

@@ -1,0 +1,30 @@
+{
+  "_nota": "Mapa ETIQUETA -> REGION generado por anonimizar.py. Permite separar Bogota de Regionales sin nombres reales.",
+  "regiones": {
+    "TECNICO-01": "VALLEDUPAR",
+    "TECNICO-02": "BOGOTA",
+    "TECNICO-03": "CALI",
+    "TECNICO-04": "TUNJA",
+    "TECNICO-05": "BUCARAMANGA",
+    "TECNICO-06": "VILLAVICENCIO",
+    "TECNICO-07": "CÚCUTA",
+    "TECNICO-08": "SIN REGION",
+    "TECNICO-09": "SINCELEJO",
+    "TECNICO-10": "BOGOTA",
+    "TECNICO-11": "MANIZALES",
+    "TECNICO-12": "BOGOTA",
+    "TECNICO-13": "BOGOTA",
+    "TECNICO-14": "BOGOTA",
+    "TECNICO-15": "MEDELLÍN",
+    "TECNICO-16": "MEDELLÍN",
+    "TECNICO-17": "PASTO",
+    "TECNICO-18": "BOGOTA",
+    "TECNICO-19": "BOGOTA",
+    "TECNICO-20": "BARRANQUILLA",
+    "TECNICO-21": "SIN REGION",
+    "TECNICO-22": "POPAYAN",
+    "TECNICO-23": "MONTERIA",
+    "TECNICO-24": "NEIVA",
+    "TECNICO-25": "IBAGUÉ"
+  }
+}

@@ -1265,6 +1265,9 @@ def main() -> None:
             visible["Vencimiento"] = (
                 venc.dt.strftime("%Y-%m-%d %H:%M").fillna("Sin fecha de vencimiento")
             )
+            for col_txt in ("Ciudad", "Tecnico", "Caso", "Regional", "Departamento"):
+                if col_txt in visible.columns:
+                    visible[col_txt] = visible[col_txt].astype(str)
 
             st.dataframe(
                 visible.style.apply(estilizar, axis=None).format(

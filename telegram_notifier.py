@@ -305,6 +305,31 @@ def _explicar_error(respuesta, chat_id: str = "") -> str:
     return f"{detalle[:300]}"
 
 
+def _partir_texto_largo(texto: str, maximo: int = 3800) -> list[str]:
+    """Divide un texto largo por lineas en partes de maximo `maximo` caracteres."""
+    if len(texto) <= maximo:
+        return [texto]
+
+    lineas = texto.split("\n")
+    partes: list[str] = []
+    actual: list[str] = []
+    longitud_actual = 0
+
+    for linea in lineas:
+        l_len = len(linea) + 1  # incluye \n
+        if longitud_actual + l_len > maximo and actual:
+            partes.append("\n".join(actual))
+            actual = [linea]
+            longitud_actual = l_len
+        else:
+            actual.append(linea)
+            longitud_actual += l_len
+
+    if actual:
+        partes.append("\n".join(actual))
+    return partes
+
+
 def enviar_mensaje(
     texto: str,
     parse_mode: str = "HTML",
@@ -315,10 +340,7 @@ def enviar_mensaje(
 ) -> bool:
     """
     Envia un mensaje a UN destino de Telegram. Devuelve True si se envio.
-
-    Reintenta con espera creciente ante fallos de red o errores 5xx.
-    Si se omiten token/chat_id, se resuelve el primer destino configurado
-    (para envios a un unico grupo use enviar_a_todos()).
+    Si el texto supera los 4000 caracteres, lo parte de forma transparente en varios mensajes.
     """
     if requests is None:
         log.error("Falta el paquete 'requests'. Instale: python -m pip install requests")
@@ -335,6 +357,34 @@ def enviar_mensaje(
         log.warning("Mensaje vacio: no se envia nada.")
         return False
 
+    # Si el mensaje supera la longitud maxima de Telegram, partirlo secuencialmente
+    if len(texto) > 4000:
+        partes = _partir_texto_largo(texto, maximo=3800)
+        exito_todos = True
+        for i, p in enumerate(partes, start=1):
+            encabezado = f"📄 <i>Parte {i}/{len(partes)}</i>\n\n" if parse_mode == "HTML" else f"Parte {i}/{len(partes)}\n\n"
+            msg = p if i == 1 else (encabezado + p)
+            ok = _enviar_mensaje_directo(
+                texto=msg, parse_mode=parse_mode, token=token, chat_id=chat_id, silencioso=silencioso, tema_id=tema_id
+            )
+            if not ok:
+                exito_todos = False
+            time.sleep(0.4)
+        return exito_todos
+
+    return _enviar_mensaje_directo(
+        texto=texto, parse_mode=parse_mode, token=token, chat_id=chat_id, silencioso=silencioso, tema_id=tema_id
+    )
+
+
+def _enviar_mensaje_directo(
+    texto: str,
+    parse_mode: str = "HTML",
+    token: str | None = None,
+    chat_id: str | None = None,
+    silencioso: bool = True,
+    tema_id: str | None = None,
+) -> bool:
     carga = {
         "chat_id": chat_id,
         "text": texto,

@@ -62,11 +62,27 @@ DIAS_COOKIE_POR_DEFECTO = 7.0
 # --------------------------------------------------------------------------
 
 def _leer_secreto(clave: str):
-    """Devuelve st.secrets[clave] o None si no existe / no hay secrets.toml."""
+    """Devuelve st.secrets[clave] o fallback directo desde .streamlit/secrets.toml."""
     try:
-        return st.secrets[clave]
+        if hasattr(st, "secrets") and clave in st.secrets:
+            val = st.secrets[clave]
+            if val is not None:
+                return val
     except Exception:
-        return None
+        pass
+
+    # Fallback directo al archivo .streamlit/secrets.toml en el directorio raiz
+    dir_raiz = os.path.dirname(os.path.abspath(__file__))
+    ruta_secrets = os.path.join(dir_raiz, ".streamlit", "secrets.toml")
+    if os.path.isfile(ruta_secrets):
+        try:
+            import toml
+            with open(ruta_secrets, encoding="utf-8") as f:
+                datos = toml.load(f)
+                return datos.get(clave)
+        except Exception:
+            pass
+    return None
 
 
 def _a_diccionario(seccion) -> dict | None:

@@ -44,9 +44,16 @@ except ImportError:  # pragma: no cover
 # Estilos de presentacion (formatos.py). Solo se importan los nombres, para no
 # crear dependencia circular con el modulo de notificaciones.
 try:
-    from formatos import ESTILOS
+    from formatos import ESTILOS, _recortar
 except ImportError:  # pragma: no cover
     ESTILOS = ("tabla", "tarjetas", "por-estado", "markdown", "resumen")
+
+    def _recortar(texto: str, ancho: int) -> str:
+        """Recorta a `ancho` caracteres agregando elipsis si hace falta."""
+        texto = str(texto)
+        if len(texto) <= ancho:
+            return texto
+        return texto[: max(ancho - 1, 1)] + "…"
 
 DIR_SCRIPT = os.path.dirname(os.path.abspath(__file__))
 ARCHIVO_CONFIG = os.path.join(DIR_SCRIPT, "config_telegram.json")
@@ -506,14 +513,6 @@ def obtener_chat_ids_recientes(token: str | None = None, limite: int = 20) -> li
 # ---------------------------------------------------------------------------
 # Formato de tablas
 # ---------------------------------------------------------------------------
-
-def _recortar(texto: str, ancho: int) -> str:
-    """Recorta a `ancho` caracteres agregando elipsis si hace falta."""
-    texto = str(texto)
-    if len(texto) <= ancho:
-        return texto
-    return texto[: max(ancho - 1, 1)] + "…"
-
 
 def _filas_tabla(df: pd.DataFrame) -> list[str]:
     """

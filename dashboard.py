@@ -69,9 +69,76 @@ import telegram_notifier
 # Proteccion de datos: si el tablero se publica en la web, se anonimiza.
 import anonimizar
 
+# Control de acceso: el tablero exige usuario y contrasena antes de mostrar nada.
+import auth
+
+# Rediseno "Accion primero" (Prototipo A): barra de control, franja de foco,
+# barra de semaforo segmentada y listas de accion.
+import vista
+
+# Sistema de diseño CSS personalizado
+import estilos_css
+
 # Refresco automatico cada 60 s (opcional, desactivado por defecto para no
 # interrumpir al usuario mientras filtra).
 INTERVALO_AUTOREFRESCO_S = 60
+
+
+def dibujar_graficos_altair(filtrado: pd.DataFrame) -> None:
+    """Dibuja gráficos interactivos de casos por región y técnico con la paleta semántica SLA."""
+    if filtrado is None or filtrado.empty:
+        st.info("No hay datos para generar los gráficos.")
+        return
+
+    import altair as alt
+
+    g1, g2 = st.columns(2)
+    with g1:
+        st.subheader("📍 Casos por región (por estado SLA)")
+        df_region = (
+            filtrado.groupby(["REGION_TECNICO", "ESTADO"])
+            .size()
+            .reset_index(name="CASOS")
+        )
+        color_scale = alt.Scale(
+            domain=[ROJO, CERRADO_TARDE, NARANJA, AMARILLO, VERDE, SIN_VENCIMIENTO, CERRADO_OK],
+            range=["#B91C1C", "#8B0000", "#C2410C", "#A16207", "#15803D", "#6B7280", "#15803D"],
+        )
+        chart_region = (
+            alt.Chart(df_region)
+            .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+            .encode(
+                x=alt.X("REGION_TECNICO:N", title="Región", sort="-y"),
+                y=alt.Y("CASOS:Q", title="Cantidad de Casos"),
+                color=alt.Color("ESTADO:N", title="Estado SLA", scale=color_scale),
+                tooltip=["REGION_TECNICO", "ESTADO", "CASOS"],
+            )
+            .properties(height=340)
+            .interactive()
+        )
+        st.altair_chart(chart_region, use_container_width=True)
+
+    with g2:
+        st.subheader("👷 Carga por técnico (Top 15)")
+        top_tec = (
+            filtrado["TECNICO"]
+            .value_counts()
+            .head(15)
+            .reset_index(name="CASOS")
+        )
+        top_tec.columns = ["TECNICO", "CASOS"]
+        chart_tec = (
+            alt.Chart(top_tec)
+            .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4, color="#0B5D0B")
+            .encode(
+                y=alt.Y("TECNICO:N", title="Técnico", sort="-x"),
+                x=alt.X("CASOS:Q", title="Casos Asignados"),
+                tooltip=["TECNICO", "CASOS"],
+            )
+            .properties(height=340)
+        )
+        st.altair_chart(chart_tec, use_container_width=True)
+
 
 # ---------------------------------------------------------------------------
 # Estilos del semaforo v2
@@ -330,16 +397,19 @@ def _registrar_casos(historial, df_casos: pd.DataFrame, canal: str, detalle: str
 
 def enviar_aviso_telegram(texto: str, todos: bool = False) -> int:
     """
-    Envia el aviso a Telegram en TEXTO PLANO.
+    Envia el aviso a Telegram con formato HTML (negrillas).
 
-    parse_mode="" es obligatorio: los avisos de avisos.py son texto plano con
-    emojis y pueden traer caracteres < > & que rompen el parseo HTML.
+    El texto que llega aqui lo compone avisos.componer_aviso_tecnico_telegram(),
+    que ya escapa los datos de la plantilla y deja solo etiquetas <b>/<i>
+    permitidas. Por eso se puede usar parse_mode="HTML": antes se enviaba en
+    texto plano y las negrillas no existian.
+
     Devuelve cuantos destinos recibieron el mensaje.
     """
     if not texto or not texto.strip():
         return 0
     if todos:
-        return int(telegram_notifier.enviar_a_todos(texto, parse_mode=""))
+        return int(telegram_notifier.enviar_a_todos(texto, parse_mode="HTML"))
 
     destinos = telegram_notifier.destinos_configurados()
     if not destinos:
@@ -348,7 +418,7 @@ def enviar_aviso_telegram(texto: str, todos: bool = False) -> int:
     return int(
         telegram_notifier.enviar_mensaje(
             texto,
-            parse_mode="",
+            parse_mode="HTML",
             chat_id=primero["chat_id"],
             tema_id=primero.get("tema_id") or None,
         )
@@ -506,7 +576,11 @@ def render_metricas_por_tecnico(df_completo: pd.DataFrame, momento: datetime) ->
 # Notificaciones pendientes a tecnicos (avisos.py)
 # ---------------------------------------------------------------------------
 
-def render_notificaciones_pendientes(casos: pd.DataFrame, historial) -> None:
+def render_notificaciones_pendientes(
+    casos: pd.DataFrame,
+    historial,
+    estados_incluidos: tuple[str, ...] | None = None,
+) -> None:
     """
     Dibuja la seccion "📨 Notificaciones pendientes a tecnicos".
 
@@ -515,25 +589,35 @@ def render_notificaciones_pendientes(casos: pd.DataFrame, historial) -> None:
     enviarlo por Telegram. En ambos casos queda registro en el Historial.
 
     Args:
-        casos: DataFrame de casos de la ventana (resultado.df). Se filtra aqui
-               por ESTADOS_ALERTA, de modo que la funcion no depende del objeto
-               Resultado (que main() no conserva).
+        casos: DataFrame de casos (la ventana operativa o el historico completo).
         historial: instancia de Historial o None si no se pudo abrir.
+        estados_incluidos: que estados entran al panel. Por defecto
+            core.ESTADOS_ALERTA, que es (ROJO, CERRADO TARDE, NARANJA, AMARILLO)
+            y NO incluye VERDE. main() pasa una tupla ampliada cuando el usuario
+            marca "incluir tambien los proximos a vencer", porque antes los casos
+            por vencer se venciaan sin que nadie los avisara.
     """
+    estados = estados_incluidos or ESTADOS_ALERTA
+
     st.divider()
     st.header("📨 Notificaciones pendientes a técnicos")
     st.caption(
-        "Casos de la ventana que requieren aviso (ROJO, CERRADO TARDE, NARANJA y "
-        "AMARILLO) agrupados por técnico. Genere el aviso, cópielo y péguelo en "
-        "WhatsApp, o envíelo por Telegram. Cada aviso queda registrado en el historial."
+        "Casos que requieren aviso agrupados por técnico: "
+        + ", ".join(estados)
+        + ". Genere el aviso, cópielo y péguelo en WhatsApp, o envíelo por "
+        "Telegram. Cada aviso queda registrado en el historial."
     )
 
     # Los estados que requieren atencion ya vienen definidos en core.
-    pendientes = casos[casos["ESTADO"].isin(ESTADOS_ALERTA)].copy() if casos is not None and not casos.empty else casos
+    pendientes = (
+        casos[casos["ESTADO"].isin(estados)].copy()
+        if casos is not None and not casos.empty
+        else casos
+    )
     if pendientes is None or pendientes.empty:
         st.success(
-            "✅ No hay casos pendientes de notificar: ningún técnico tiene casos en "
-            "estado ROJO, CERRADO TARDE, NARANJA o AMARILLO dentro de la ventana."
+            "✅ No hay casos pendientes de notificar: ningún técnico tiene casos "
+            f"en estado {', '.join(estados)}."
         )
         return
 
@@ -564,9 +648,10 @@ def render_notificaciones_pendientes(casos: pd.DataFrame, historial) -> None:
             "no podrán guardar."
         )
 
-    tab_envio, tab_resumen, tab_historial = st.tabs(
+    tab_envio, tab_consolidado, tab_resumen, tab_historial = st.tabs(
         [
             "✉️ Aviso al técnico",
+            "📢 Reporte Consolidado (TODOS)",
             "📊 Pendientes por técnico",
             "🕒 Última notificación por técnico",
         ]
@@ -607,10 +692,21 @@ def render_notificaciones_pendientes(casos: pd.DataFrame, historial) -> None:
         )
 
         df_tecnico = grupos.get(tecnico)
+        # Texto PLANO: es el que se copia y se pega en WhatsApp (con negrillas
+        # de Telegram se verian las etiquetas <b>).
         texto = avisos.componer_aviso_tecnico(
             tecnico,
             df_tecnico,
             canal=canal,
+            un_solo_mensaje=un_solo_mensaje,
+            menciones=menciones,
+        )
+        # Version HTML para Telegram: negrillas de verdad y casos ordenados con
+        # la prioridad de la torre (primero los proximos a vencer, luego los
+        # vencidos).
+        texto_telegram = avisos.componer_aviso_tecnico_telegram(
+            tecnico,
+            df_tecnico,
             un_solo_mensaje=un_solo_mensaje,
             menciones=menciones,
         )
@@ -643,8 +739,15 @@ def render_notificaciones_pendientes(casos: pd.DataFrame, historial) -> None:
                 + " · ".join(
                     f"**{d['nombre']}** (`{d['chat_id']}`)" for d in destinos
                 )
-                + " · Se envía en texto plano (`parse_mode=\"\"`) para no romper los emojis."
+                + " · Se envía con **formato HTML (negrillas)** y los casos "
+                "ordenados: primero los próximos a vencer, luego los vencidos."
             )
+            with st.expander("👀 Vista previa del mensaje que recibirá Telegram"):
+                st.markdown(
+                    "Los datos resaltados en **negrita** son los que el técnico "
+                    "debe ver primero: número de caso y tiempo restante/vencido."
+                )
+                st.code(texto_telegram, language="html")
             todos = st.checkbox(
                 "Enviar a todos los destinos (si se desmarca, solo al primero)",
                 value=len(destinos) > 1,
@@ -658,7 +761,7 @@ def render_notificaciones_pendientes(casos: pd.DataFrame, historial) -> None:
                 disabled=df_tecnico is None or df_tecnico.empty,
             ):
                 with st.spinner("Enviando el aviso a Telegram..."):
-                    alcanzados = enviar_aviso_telegram(texto, todos=todos)
+                    alcanzados = enviar_aviso_telegram(texto_telegram, todos=todos)
                 if alcanzados:
                     registrados = _registrar_casos(
                         historial, df_tecnico, "telegram", "aviso al tecnico"
@@ -732,6 +835,66 @@ def render_notificaciones_pendientes(casos: pd.DataFrame, historial) -> None:
                 "aviso en `historial.db` sin enviar nada, para que la columna "
                 "*última notificación* y el contador de hoy queden al día."
             )
+
+    # ==================================================================
+    # Pestana Consolidada: informe global de TODOS los casos pendientes
+    # ==================================================================
+    with tab_consolidado:
+        st.markdown("##### 📢 Reporte Consolidado Global de Todos los Casos")
+        st.caption(
+            "Consolida TODOS los casos pendientes en la Torre de Control SLA ordenados por urgencia. "
+            "En Telegram incluye números de caso en `<code>` para copiado táctil instantáneo."
+        )
+
+        texto_cons_wa = avisos.componer_aviso_consolidado_whatsapp(pendientes, menciones)
+        texto_cons_tg = avisos.componer_aviso_consolidado_telegram(pendientes, menciones)
+
+        st.markdown("**📋 Texto para copiar a WhatsApp:**")
+        st.code(texto_cons_wa, language=None)
+        st.caption("Pulse el icono de copiar arriba a la derecha del recuadro.")
+
+        st.markdown("##### 🚀 Envío Consolidado por Telegram")
+        if telegram_notifier.telegram_configurado():
+            with st.expander("👀 Vista previa formato Telegram (con <code> táctil de 1 toque)"):
+                st.code(texto_cons_tg, language="html")
+
+            c_btn1, c_btn2 = st.columns([3, 2])
+            with c_btn1:
+                if st.button(
+                    "🚀 Enviar Reporte Consolidado a Telegram",
+                    type="primary",
+                    key="btn_tg_consolidado",
+                    disabled=pendientes is None or pendientes.empty,
+                ):
+                    with st.spinner("Enviando reporte consolidado a Telegram..."):
+                        alcanzados = enviar_aviso_telegram(texto_cons_tg, todos=True)
+                    if alcanzados:
+                        registrados = _registrar_casos(
+                            historial, pendientes, "telegram", "reporte consolidado de todos los casos"
+                        )
+                        st.success(
+                            f"✅ Reporte consolidado enviado a Telegram ({alcanzados} destino(s)). "
+                            f"Se registraron {registrados} casos en el historial."
+                        )
+                        st.rerun()
+                    else:
+                        st.error("❌ Telegram no aceptó el mensaje. Revise credenciales y conexión.")
+            with c_btn2:
+                if st.button(
+                    "✅ Marcar todos como notificados (WhatsApp)",
+                    key="btn_wa_consolidado_marcar",
+                    disabled=pendientes is None or pendientes.empty,
+                ):
+                    registrados = _registrar_casos(
+                        historial, pendientes, CANAL_WHATSAPP,
+                        "reporte consolidado copiado y enviado por WhatsApp",
+                        resultado=RESULTADO_GENERADO,
+                    )
+                    if registrados:
+                        st.success(f"✅ {registrados} casos marcados como notificados.")
+                        st.rerun()
+        else:
+            st.info("Telegram no está configurado.")
 
     # ==================================================================
     # Pestana 2: tabla de pendientes (a)
@@ -843,8 +1006,15 @@ def main() -> None:
         initial_sidebar_state="expanded",
     )
 
+    # --- Control de acceso ------------------------------------------------
+    auth.puente_secretos()
+    sesion = auth.exigir_login()
+
+    # --- Inyección de Sistema de Diseño CSS -------------------------------
+    estilos_css.inyectar_estilos_css()
+
     st.title("🛰️ Torre de Control SLA — Colsof / Banco Agrario")
-    st.caption("Monitoreo de Acuerdos de Nivel de Servicio para soporte tecnico en sitio.")
+    st.caption("Monitoreo de Acuerdos de Nivel de Servicio para soporte técnico en sitio.")
 
     # --- Barra lateral ----------------------------------------------------
     with st.sidebar:
@@ -868,11 +1038,9 @@ def main() -> None:
             st.caption(AYUDA_ESTADO[estado])
         st.divider()
 
-    # --- Localizacion del archivo o subida manual -------------------------
+    # --- Localización del archivo o subida manual -------------------------
     momento = datetime.now()
 
-    # En la web no siempre hay archivo local: se permite SUBIR el Excel. Los
-    # datos se procesan en memoria y no se guardan en el servidor.
     origen_subido = None
     with st.sidebar:
         st.divider()
@@ -912,7 +1080,7 @@ def main() -> None:
             st.stop()
         lector = lambda: cargar(ruta, firma_archivo(ruta), momento.isoformat())
 
-    # --- Lectura ----------------------------------------------------------
+    # --- Lectura de Datos -------------------------------------------------
     try:
         with st.spinner("Leyendo la plantilla y calculando SLA..."):
             (df, df_completo, total_hoja, total_activos,
@@ -934,71 +1102,139 @@ def main() -> None:
         st.code(f"{type(exc).__name__}: {exc}")
         st.stop()
 
-    # --- Anonimizacion (protege los datos si el tablero es publico) -------
+    # --- Anonimización ----------------------------------------------------
     aviso_privacidad = anonimizar.aviso_para_la_interfaz()
     if aviso_privacidad:
         st.warning(aviso_privacidad, icon="🔒")
         df = anonimizar.anonimizar(df)
         df_completo = anonimizar.anonimizar(df_completo)
 
-    st.caption(
+    modo_datos = anonimizar.modo_actual()
+    badge_modo = (
+        "<span class='badge-timestamp'>🔓 Datos Reales</span>"
+        if modo_datos == anonimizar.MODO_NO
+        else f"<span class='badge-timestamp'>🔒 {anonimizar.descripcion(modo_datos)}</span>"
+    )
+
+    st.markdown(
         f"📄 `{os.path.basename(ruta)}` · "
-        f"Calculo: **{momento:%Y-%m-%d %H:%M:%S}** · "
-        f"Filas en la hoja: **{total_hoja}** · Casos activos: **{total_activos}** · "
-        f"En ventana ({dias_ventana} dias + vencidos): **{len(df)}**"
+        f"Cálculo: **{momento:%Y-%m-%d %H:%M:%S}** · "
+        f"Filas: **{total_hoja}** · Activos: **{total_activos}** · "
+        f"En ventana: **{len(df)}** · {badge_modo}",
+        unsafe_allow_html=True,
     )
 
     for aviso in avisos:
         st.warning(f"⚠️ {aviso}", icon="⚠️")
 
-    # --- KPIs (semaforo v2: 7 estados, sobre TODOS los casos) -------------
+    # --- Cargar Historial SQLite ------------------------------------------
+    historial, hist_tecnicos, hist_detalle, hist_resumen, hist_error = leer_historial()
+
+    # --- Conteos globales -------------------------------------------------
     conteo_completo = (
         df_completo["ESTADO"].value_counts().to_dict() if not df_completo.empty else {}
     )
     total_completo = len(df_completo)
 
-    st.subheader("🚦 Semaforo de casos (activos + cerrados)")
-    # El orden es el de gravedad de core.ORDEN_ESTADO: ROJO primero, CERRADO OK al final.
-    for grupo in (TODOS_LOS_ESTADOS[:4], TODOS_LOS_ESTADOS[4:]):
-        columnas_kpi = st.columns(len(grupo))
-        for columna, estado in zip(columnas_kpi, grupo):
-            cantidad = int(conteo_completo.get(estado, 0))
-            columna.metric(
-                label=f"{ICONO_ESTADO[estado]} {estado}",
-                value=cantidad,
-                delta=f"{cantidad / total_completo * 100:.0f}% del total"
-                if total_completo
-                else None,
-                delta_color="off",
-                help=AYUDA_ESTADO[estado],
-            )
-
-    st.divider()
-
-    if df.empty:
-        st.success(
-            "✅ No hay casos activos dentro de la ventana de notificacion "
-            "(todos los casos abiertos estan resueltos o vencen mas adelante)."
-        )
+    # Alcance de los avisos para la torre de control
+    incluir_proximos = bool(st.session_state.get("notif_incluir_proximos", True))
+    if incluir_proximos:
+        estados_notificar = (ROJO, NARANJA, AMARILLO, VERDE)
+        conjunto_notificar = df_completo[
+            (~df_completo["CERRADO"])
+            & df_completo["ESTADO"].isin(estados_notificar)
+        ].copy()
     else:
-        # --- Filtros ------------------------------------------------------
-        st.subheader("🔎 Filtros")
+        estados_notificar = ESTADOS_ALERTA
+        conjunto_notificar = df[df["ESTADO"].isin(estados_notificar)].copy()
+
+    tecnicos_notificables = {
+        str(t).strip()
+        for t in conjunto_notificar["TECNICO"].unique()
+        if str(t).strip()
+    }
+
+    # =====================================================================
+    # NAVEGACIÓN PRINCIPAL EN PESTAÑAS (ST.TABS)
+    # =====================================================================
+    tab_despacho, tab_explorador, tab_analitica, tab_historial = st.tabs([
+        "🎯 Despacho Operativo",
+        "📋 Explorador de Casos & SLA",
+        "📊 Analítica & Técnicos",
+        "📜 Historial & Auditoría",
+    ])
+
+    # ---------------------------------------------------------------------
+    # PESTAÑA 1: 🎯 DESPACHO OPERATIVO
+    # ---------------------------------------------------------------------
+    with tab_despacho:
+        control = vista.barra_control(df_completo, df, momento)
+        df_vista = control["datos"]
+
+        st.divider()
+
+        # Franja de Foco KPI Cards
+        listas = vista.construir_listas(df_completo, momento)
+        vista.franja_foco(
+            listas["n_vencidos"],
+            listas["n_vencen_hoy"],
+            listas["n_proximos_3d"],
+            total_completo,
+        )
+
+        st.markdown("##### 🚦 Reparto del semáforo (todos los casos)")
+        vista.barra_semaforo(conteo_completo, total_completo)
+
+        st.divider()
+
+        # Listas de acción priorizadas con popovers flotantes contextualmente
+        vista.lista_accion(
+            listas["vencen_hoy"],
+            "⏰ Vencen en las próximas 24 h — última oportunidad",
+            "Del más urgente al menos urgente. Todavía se pueden salvar. Presiona '📨 Avisar' para notificar inmediatamente.",
+            "✅ Ningún caso vence en las próximas 24 horas.",
+            "accion_hoy",
+            tecnicos_notificables=tecnicos_notificables,
+            df_completo=df_completo,
+            historial=historial,
+        )
+        st.divider()
+        vista.lista_accion(
+            listas["vencidos"],
+            "🚨 Ya vencidos — el más atrasado primero",
+            "Sin resolver desde hace más tiempo. Requieren acción inmediata.",
+            "✅ No hay casos vencidos sin cerrar.",
+            "accion_vencidos",
+            tecnicos_notificables=tecnicos_notificables,
+            df_completo=df_completo,
+            historial=historial,
+        )
+
+    # ---------------------------------------------------------------------
+    # PESTAÑA 2: 📋 EXPLORADOR DE CASOS & SLA
+    # ---------------------------------------------------------------------
+    with tab_explorador:
+        # Recuperar df_vista o calcular si se cambia de pestaña
+        if "df_vista" not in locals():
+            df_vista = df_completo
+
+        st.subheader("🔎 Filtros avanzados de casos")
         f1, f2, f3, f4 = st.columns([2, 2, 2, 2])
 
-        tecnicos = sorted(t for t in df["TECNICO"].unique() if t)
-        regiones = sorted(df["REGION_TECNICO"].unique())
-        estados = [e for e in sorted(df["ESTADO"].unique(), key=lambda x: ORDEN_ESTADO[x])]
+        tecnicos = sorted(t for t in df_vista["TECNICO"].unique() if t)
+        regiones = sorted(df_vista["REGION_TECNICO"].unique())
+        estados = [e for e in sorted(df_vista["ESTADO"].unique(), key=lambda x: ORDEN_ESTADO[x])]
 
         with f1:
-            sel_tecnicos = st.multiselect("👷 Tecnico", tecnicos, placeholder="Todos los tecnicos")
+            sel_tecnicos = st.multiselect("👷 Técnico", tecnicos, placeholder="Todos los técnicos", key="exp_tecnicos")
         with f2:
-            sel_regiones = st.multiselect("📍 Region", regiones, placeholder="Todas las regiones")
+            sel_regiones = st.multiselect("📍 Región", regiones, placeholder="Todas las regiones", key="exp_regiones")
         with f3:
-            sel_estados = st.multiselect("🚦 Estado", estados, placeholder="Todos los estados")
+            sel_estados = st.multiselect("🚦 Estado", estados, placeholder="Todos los estados", key="exp_estados")
         with f4:
-            busqueda = st.text_input("🔍 Buscar caso / ciudad", placeholder="Ej: IM3237396")
+            busqueda = st.text_input("🔍 Buscar caso / ciudad", placeholder="Ej: IM3237396", key="exp_busqueda")
 
-        filtrado = df.copy()
+        filtrado = df_vista.copy()
         if sel_tecnicos:
             filtrado = filtrado[filtrado["TECNICO"].isin(sel_tecnicos)]
         if sel_regiones:
@@ -1013,22 +1249,21 @@ def main() -> None:
             )
             filtrado = filtrado[mascara]
 
-        # Las columnas sin region se resaltan para que no pasen desapercibidas.
         if REGION_DESCONOCIDA in set(filtrado["REGION_TECNICO"]):
             st.warning(
-                f"Hay casos con tecnico no registrado en el diccionario de regiones "
+                f"Hay casos con técnico no registrado en el diccionario de regiones "
                 f"({REGION_DESCONOCIDA}). Revise el mapeo en `core.py`."
             )
 
-        # --- Tabla --------------------------------------------------------
-        st.subheader(f"📋 Casos en ventana ({len(filtrado)} de {len(df)})")
+        st.markdown(f"#### 📋 Tabla de Casos ({len(filtrado)} de {len(df_vista)})")
 
         if filtrado.empty:
-            st.info("Ningun caso coincide con los filtros seleccionados.")
+            st.info("Ningún caso coincide con los filtros seleccionados.")
         else:
             visible = filtrado[list(COLUMNAS_TABLA)].rename(columns=COLUMNAS_TABLA)
-            visible["Vencimiento"] = pd.to_datetime(visible["Vencimiento"]).dt.strftime(
-                "%Y-%m-%d %H:%M"
+            venc = pd.to_datetime(visible["Vencimiento"], errors="coerce")
+            visible["Vencimiento"] = (
+                venc.dt.strftime("%Y-%m-%d %H:%M").fillna("Sin fecha de vencimiento")
             )
 
             st.dataframe(
@@ -1037,12 +1272,12 @@ def main() -> None:
                 ),
                 use_container_width=True,
                 hide_index=True,
-                height=min(700, 40 + 35 * len(visible)),
+                height=min(650, 40 + 35 * len(visible)),
                 column_config={
                     "Horas restantes": st.column_config.NumberColumn(
                         "Horas restantes", help="Negativo = vencido", format="%.2f"
                     ),
-                    " " : st.column_config.TextColumn(" ", width="small"),
+                    " ": st.column_config.TextColumn(" ", width="small"),
                 },
             )
 
@@ -1051,166 +1286,76 @@ def main() -> None:
                 data=visible.to_csv(index=False).encode("utf-8-sig"),
                 file_name=f"casos_sla_{momento:%Y%m%d_%H%M}.csv",
                 mime="text/csv",
-                key="descarga_casos",
+                key="descarga_casos_tab",
             )
 
-        # --- Analisis agregado --------------------------------------------
+    # ---------------------------------------------------------------------
+    # PESTAÑA 3: 📊 ANALÍTICA & TÉCNICOS
+    # ---------------------------------------------------------------------
+    with tab_analitica:
+        st.subheader("📈 Análisis de Gestión y Distribución de Carga")
+        if "filtrado" not in locals():
+            filtrado = df_completo
+
+        # Gráficos de Altair con colores semánticos SLA
+        dibujar_graficos_altair(filtrado)
+
         st.divider()
-        g1, g2 = st.columns(2)
 
-        with g1:
-            st.subheader("📍 Casos por region")
-            por_region = (
-                filtrado.groupby(["REGION_TECNICO", "ESTADO"])
-                .size()
-                .unstack(fill_value=0)
-                .reindex(columns=list(TODOS_LOS_ESTADOS), fill_value=0)
-            )
-            st.bar_chart(por_region, height=320)
+        # Métricas de Gestión por Técnico (Rankings, Cumplimiento, Matriz)
+        st.subheader("🏆 Rankings de Gestión y Matriz de Cumplimiento")
+        render_metricas_por_tecnico(df_completo, momento)
 
-        with g2:
-            st.subheader("👷 Carga por tecnico (top 15)")
-            por_tecnico = (
-                filtrado["TECNICO"].value_counts().head(15).rename("Casos activos")
-            )
-            st.bar_chart(por_tecnico, height=320)
+    # ---------------------------------------------------------------------
+    # PESTAÑA 4: 📜 HISTORIAL & AUDITORÍA
+    # ---------------------------------------------------------------------
+    with tab_historial:
+        st.subheader("🔔 Panel General de Notificaciones y Auditoría")
 
-    # ======================================================================
-    # SECCION NUEVA: Notificaciones y Metricas
-    # ======================================================================
-    st.divider()
-    st.header("🔔 Notificaciones y Métricas")
-    st.caption(
-        "Historial de avisos registrado en `historial.db` (SQLite) por el notificador, "
-        "mas las metricas de gestion por tecnico calculadas sobre todos los casos."
-    )
-
-    historial, hist_tecnicos, hist_detalle, hist_resumen, hist_error = leer_historial()
-    if hist_error:
-        st.warning(
-            "No se pudo leer el historial de notificaciones "
-            f"(historial.db): {hist_error}"
+        st.checkbox(
+            "Incluir también los próximos a vencer (no solo los vencidos y urgentes)",
+            value=True,
+            key="notif_incluir_proximos",
+            help="Marcado: incluye casos que aún no vencen. Desmarcado: solo alerta inmediata.",
         )
 
-    # --- a) KPIs del historial -------------------------------------------
-    st.subheader("📊 Indicadores del historial")
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("🔔 Total notificaciones", int(hist_resumen.get("total", 0)))
-    k2.metric("✅ Enviadas", int(hist_resumen.get("enviadas", 0)))
-    k3.metric("❌ Fallidas", int(hist_resumen.get("fallidas", 0)))
-    k4.metric("📄 Casos distintos", int(hist_resumen.get("casos", 0)))
-    k5.metric("👷 Tecnicos notificados", int(hist_resumen.get("tecnicos", 0)))
+        tecnico_pedido = st.session_state.pop("tecnico_a_avisar", None)
+        if tecnico_pedido:
+            st.success(f"Técnico seleccionado desde la lista: **{tecnico_pedido}**", icon="👉")
 
-    # --- b) Notificaciones por tecnico -----------------------------------
-    st.subheader("👥 Notificaciones por tecnico")
-    if hist_tecnicos is None or hist_tecnicos.empty:
-        st.info("Aun no hay notificaciones registradas en el historial.")
-    else:
-        st.dataframe(
-            hist_tecnicos,
-            use_container_width=True,
-            hide_index=True,
-            height=min(430, 40 + 35 * len(hist_tecnicos)),
-        )
-        st.download_button(
-            "⬇️ Descargar notificaciones por tecnico (CSV)",
-            data=hist_tecnicos.to_csv(index=False).encode("utf-8-sig"),
-            file_name=f"notificaciones_por_tecnico_{momento:%Y%m%d_%H%M}.csv",
-            mime="text/csv",
-            key="descarga_notif_tecnico",
-        )
+        render_notificaciones_pendientes(conjunto_notificar, historial, estados_notificar)
 
-    # --- c) Historial detallado con filtros ------------------------------
-    st.subheader("🗂️ Historial detallado de notificaciones")
-    if hist_detalle is None or hist_detalle.empty:
-        st.info(
-            "El historial esta vacio: todavia no se ha registrado ningun aviso. "
-            "Se llena al ejecutar `alertas_windows.py` o el notificador de Telegram."
-        )
-    else:
-        fechas = pd.to_datetime(hist_detalle["fecha_hora"], errors="coerce")
-        fecha_max, fecha_min = fechas.max(), fechas.min()
-        hoy = datetime.now().date()
-        defecto_hasta = fecha_max.date() if pd.notna(fecha_max) else hoy
-        defecto_desde = (
-            (fecha_max - pd.Timedelta(days=30)).date() if pd.notna(fecha_max)
-            else hoy - timedelta(days=30)
-        )
-        if pd.notna(fecha_min) and defecto_desde < fecha_min.date():
-            defecto_desde = fecha_min.date()
+        st.divider()
 
-        h1, h2, h3 = st.columns([2, 1, 1])
-        with h1:
-            tecnicos_notif = sorted(
-                str(t) for t in hist_detalle["tecnico"].dropna().unique() if str(t).strip()
-            )
-            sel_notif_tecnicos = st.multiselect(
-                "👷 Tecnico",
-                tecnicos_notif,
-                placeholder="Todos los tecnicos",
-                key="filtro_notif_tecnico",
-            )
-        with h2:
-            desde = st.date_input("📅 Desde", value=defecto_desde, key="filtro_notif_desde")
-        with h3:
-            hasta = st.date_input("📅 Hasta", value=defecto_hasta, key="filtro_notif_hasta")
-
-        detalle = hist_detalle
-        if desde and hasta:
-            if desde > hasta:
-                st.warning("La fecha 'Desde' es posterior a 'Hasta': se intercambian los limites.")
-                desde, hasta = hasta, desde
-            # El filtro de fechas se delega en la API del historial.
-            if historial is not None:
-                detalle = historial.leer(
-                    desde=f"{desde} 00:00:00", hasta=f"{hasta} 23:59:59"
-                )
-            else:
-                detalle = detalle[
-                    (hist_detalle["fecha_hora"] >= f"{desde} 00:00:00")
-                    & (hist_detalle["fecha_hora"] <= f"{hasta} 23:59:59")
-                ]
-        if sel_notif_tecnicos:
-            detalle = detalle[detalle["tecnico"].isin(sel_notif_tecnicos)]
-
-        if detalle.empty:
-            st.info("Ninguna notificacion coincide con los filtros seleccionados.")
+        # Historial SQLite
+        st.subheader("🗂️ Registro de Auditoría (SQLite)")
+        if hist_error:
+            st.warning(f"No se pudo leer el historial de notificaciones: {hist_error}")
         else:
-            visibles = detalle.head(MAX_FILAS_DETALLE)
-            st.caption(
-                f"Mostrando {len(visibles)} de {len(detalle)} notificacion(es) "
-                f"(maximo {MAX_FILAS_DETALLE})."
-            )
-            st.dataframe(
-                visibles,
-                use_container_width=True,
-                hide_index=True,
-                height=min(500, 40 + 35 * len(visibles)),
-            )
-            st.download_button(
-                "⬇️ Descargar historial filtrado (CSV)",
-                data=detalle.to_csv(index=False).encode("utf-8-sig"),
-                file_name=f"historial_notificaciones_{momento:%Y%m%d_%H%M}.csv",
-                mime="text/csv",
-                key="descarga_notif_detalle",
-            )
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("🔔 Notificaciones", int(hist_resumen.get("total", 0)))
+            k2.metric("✅ Enviadas", int(hist_resumen.get("enviadas", 0)))
+            k3.metric("❌ Fallidas", int(hist_resumen.get("fallidas", 0)))
+            k4.metric("📄 Casos", int(hist_resumen.get("casos", 0)))
+            k5.metric("👷 Técnicos", int(hist_resumen.get("tecnicos", 0)))
 
-    # ======================================================================
-    # SECCION NUEVA: Notificaciones pendientes a tecnicos
-    # ======================================================================
-    render_notificaciones_pendientes(df, historial)
-
-    # ======================================================================
-    # Metricas de gestion por tecnico (core.metricas_por_tecnico)
-    # ======================================================================
-    st.divider()
-    st.subheader("📈 Metricas de gestion por tecnico")
-    render_metricas_por_tecnico(df_completo, momento)
+            if hist_detalle is not None and not hist_detalle.empty:
+                st.dataframe(
+                    hist_detalle.head(MAX_FILAS_DETALLE),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=min(450, 40 + 35 * len(hist_detalle)),
+                )
+                st.download_button(
+                    "⬇️ Descargar Historial Completo (CSV)",
+                    data=hist_detalle.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"historial_notificaciones_{momento:%Y%m%d_%H%M}.csv",
+                    mime="text/csv",
+                    key="descarga_historial_tab",
+                )
 
     if autorrefresco:
-        # Recarga la pagina para recalcular el tiempo restante.
         import time
-
         time.sleep(INTERVALO_AUTOREFRESCO_S)
         st.rerun()
 

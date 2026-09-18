@@ -287,12 +287,12 @@ Es la limitación de la sección 7. La solución es una base externa.
 
 ## 11. Resumen
 
-```
-1. python preparar_deploy_streamlit.py        <- en el PC
-2. cd DEPLOY_STREAMLIT && streamlit run dashboard.py   <- probar
-3. git init / add / commit / push              <- repo en GitHub
+```powershell
+1. streamlit run dashboard.py            <- probar en local (raíz del repositorio)
+2. git add . && git commit -m "..."      <- confirmar cambios
+3. git push                              <- subir a GitHub
 4. share.streamlit.io -> New app -> dashboard.py
-5. Secrets -> TORRE_ANONIMIZAR = "completo"
+5. Settings -> Secrets -> TORRE_ANONIMIZAR = "completo"
 ```
 
 **Lo que ganas:** un tablero central consultable desde cualquier navegador.

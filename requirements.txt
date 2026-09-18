@@ -14,3 +14,10 @@ streamlit>=1.30
 
 # Envio a Telegram (opcional: si no se configura, el boton no aparece)
 requests>=2.31
+
+# Control de acceso: login con usuario y contrasena (auth.py).
+# Arrastra bcrypt, pyjwt, cryptography, pyyaml y extra-streamlit-components.
+streamlit-authenticator>=0.4.2
+
+# Lectura/escritura del archivo de secretos (configurar_acceso.py)
+toml>=0.10

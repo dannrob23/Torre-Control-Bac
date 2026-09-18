@@ -81,9 +81,15 @@ def modo_actual() -> str:
     """
     Modo de anonimizacion activo.
 
-    Prioridad: variable de entorno TORRE_ANONIMIZAR; si no esta definida y la
-    app corre en la nube, se anonimiza por defecto (proteccion razonable);
-    si corre en local, no se anonimiza.
+    Prioridad: variable de entorno TORRE_ANONIMIZAR (o el secreto del mismo
+    nombre, que auth.puente_secretos copia al entorno); si no esta definida,
+    los datos se muestran REALES.
+
+    Nota de la version actual: antes, si la app corria en la nube, se anonimizaba
+    automaticamente. Eso se quito a proposito, porque ahora la proteccion de los
+    datos la da el LOGIN obligatorio (auth.py), no el enmascaramiento. Si en
+    algun momento se publica el tablero SIN login, defina TORRE_ANONIMIZAR en
+    "parcial" o "completo".
     """
     valor = (os.environ.get("TORRE_ANONIMIZAR") or "").strip().lower()
     if valor in MODOS:
@@ -92,7 +98,7 @@ def modo_actual() -> str:
         return MODO_COMPLETO
     if valor in ("false", "0", "none"):
         return MODO_NO
-    return MODO_COMPLETO if en_la_nube() else MODO_NO
+    return MODO_NO
 
 
 def descripcion(modo: str | None = None) -> str:

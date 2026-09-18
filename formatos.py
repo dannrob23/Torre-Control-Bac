@@ -300,6 +300,7 @@ def formato_tabla(df: pd.DataFrame, titulo: str = "CASOS ACTIVOS") -> str:
 
 
 def _recortar(texto: str, ancho: int) -> str:
+    """Recorta a `ancho` caracteres agregando elipsis (…) si es necesario."""
     texto = str(texto)
     return texto if len(texto) <= ancho else texto[: max(ancho - 1, 1)] + "…"
 

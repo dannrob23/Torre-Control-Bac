@@ -621,6 +621,35 @@ def render_notificaciones_pendientes(
         )
         return
 
+    # --- Filtro por Zona / Región (Bogotá vs Regionales) ------------------
+    col_f1, col_f2 = st.columns([3, 2])
+    with col_f1:
+        filtro_region_notif = st.selectbox(
+            "🗺️ Alcance regional del despacho",
+            [
+                "🌐 Todas las regiones (Global)",
+                "🌆 Solo Bogotá",
+                "⛰️ Solo Regionales (Fuera de Bogotá)",
+            ],
+            index=0,
+            key="filtro_region_despacho_notif",
+            help="Permite enviar notificaciones separadas para los técnicos de Bogotá o para las regionales.",
+        )
+    with col_f2:
+        st.caption(
+            "💡 **Separe su despacho**: Elija *Solo Bogotá* o *Solo Regionales* "
+            "para enviar reportes segmentados."
+        )
+
+    if filtro_region_notif == "🌆 Solo Bogotá":
+        pendientes = telegram_notifier.filtrar_casos_por_filtro(pendientes, "bogota")
+    elif filtro_region_notif == "⛰️ Solo Regionales (Fuera de Bogotá)":
+        pendientes = telegram_notifier.filtrar_casos_por_filtro(pendientes, "regionales")
+
+    if pendientes is None or pendientes.empty:
+        st.info(f"ℹ️ No hay casos pendientes de notificar para la zona: **{filtro_region_notif}**.")
+        return
+
     resumen = avisos.resumen_pendientes(pendientes)
     grupos = avisos.agrupar_por_tecnico(pendientes)
     menciones = avisos.cargar_menciones()

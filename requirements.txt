@@ -1,23 +1,29 @@
 # ---------------------------------------------------------------------------
-# Torre de Control SLA - dependencias para Streamlit Cloud
+# Torre de Control SLA - Colsof / Banco Agrario
+# Dependencias del proyecto  (version 2)
 #
-# Se instalan automaticamente al desplegar. Solo lo que el DASHBOARD necesita:
-# nada de tkinter, plyer ni PowerShell (eso es de escritorio Windows).
+# Instalacion normal (con internet):
+#     python -m pip install -r requirements.txt
+#
+# Instalacion sin conexion (ver docs/TUTORIAL_INSTALACION.md):
+#     python -m pip install --no-index --find-links=wheels -r requirements.txt
 # ---------------------------------------------------------------------------
 
-# Nucleo: lectura del Excel y calculo de SLA
+# --- NUCLEO: lectura del Excel y calculo de SLA (OBLIGATORIO) ---
 pandas>=2.0,<3.0
 openpyxl>=3.1,<4.0
 
-# Dashboard web
-streamlit>=1.30
-
-# Envio a Telegram (opcional: si no se configura, el boton no aparece)
+# --- TELEGRAM: notificaciones al grupo de la torre de control ---
 requests>=2.31
 
-# Control de acceso: login con usuario y contrasena (auth.py).
-# Arrastra bcrypt, pyjwt, cryptography, pyyaml y extra-streamlit-components.
-streamlit-authenticator>=0.4.2
+# --- DASHBOARD WEB (opcional: solo si usa INICIAR_DASHBOARD.bat) ---
+streamlit>=1.30
 
-# Lectura/escritura del archivo de secretos (configurar_acceso.py)
-toml>=0.10
+# --- NOTIFICACIONES DE ESCRITORIO (opcional) ---
+# Si no esta instalado (o falla), alertas_windows.py usa automaticamente un
+# respaldo con toasts nativos de Windows via PowerShell, sin dependencias extra.
+# Descomente la linea siguiente si desea usar plyer:
+# plyer>=2.1
+
+# NOTA: la interfaz grafica de escritorio (app_gui.py) usa tkinter, incluido con
+# Python en Windows. NO requiere instalacion aparte.

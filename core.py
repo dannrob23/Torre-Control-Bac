@@ -21,9 +21,8 @@ import sys
 import time
 import unicodedata
 import warnings
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 if sys.platform == "win32":
     try:
@@ -180,7 +179,10 @@ def _cargar_regiones_anonimas() -> None:
 
 REGION_DESCONOCIDA = "SIN REGION"
 
-ZONA_COLOMBIA = ZoneInfo("America/Bogota")
+# Colombia (America/Bogota) usa UTC-5 todo el anio, sin horario de verano.
+# Se usa un offset fijo en lugar de zoneinfo para no depender de la base de
+# datos de zonas horarias (tzdata), que no esta instalada en Streamlit Cloud.
+ZONA_COLOMBIA = timezone(timedelta(hours=-5))
 
 
 def ahora_colombia() -> datetime:

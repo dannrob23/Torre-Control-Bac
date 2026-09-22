@@ -30,9 +30,10 @@ from __future__ import annotations
 import html as _html
 import json
 import os
-from datetime import datetime
 
 import pandas as pd
+
+from core import ahora_colombia
 
 DIR_SCRIPT = os.path.dirname(os.path.abspath(__file__))
 ARCHIVO_MENCIONES = os.path.join(DIR_SCRIPT, "menciones.json")
@@ -257,7 +258,7 @@ def componer_aviso_multiple(df: pd.DataFrame, canal: str = "whatsapp",
 
     tecnico = str(df.iloc[0].get("TECNICO", "") or "").strip()
     cantidad = len(df)
-    momento = datetime.now().strftime("%d/%m/%Y %H:%M")
+    momento = ahora_colombia().strftime("%d/%m/%Y %H:%M")
 
     lineas = [
         f"⚠️⏳🚨 AVISO DE VENCIMIENTOS PROXIMOS ({cantidad} casos) 🚨⏳⚠️",
@@ -502,7 +503,7 @@ def componer_aviso_consolidado_telegram(df: pd.DataFrame, menciones: dict | None
     if df is None or df.empty:
         return "✅ <b>No hay casos pendientes en la Torre de Control SLA.</b>"
 
-    momento = datetime.now().strftime("%d/%m/%Y %H:%M")
+    momento = ahora_colombia().strftime("%d/%m/%Y %H:%M")
     ordenados = orden_para_aviso(df)
     total = len(ordenados)
     n_vencidos = int((ordenados["ESTADO"] == "ROJO").sum())
@@ -544,7 +545,7 @@ def componer_aviso_consolidado_whatsapp(df: pd.DataFrame, menciones: dict | None
     if df is None or df.empty:
         return "✅ No hay casos pendientes en la Torre de Control SLA."
 
-    momento = datetime.now().strftime("%d/%m/%Y %H:%M")
+    momento = ahora_colombia().strftime("%d/%m/%Y %H:%M")
     ordenados = orden_para_aviso(df)
     total = len(ordenados)
     n_vencidos = int((ordenados["ESTADO"] == "ROJO").sum())
@@ -660,7 +661,7 @@ def componer_aviso_telegram(df: pd.DataFrame, canal: str = "telegram",
         return ""
 
     tecnico = str(df.iloc[0].get("TECNICO", "") or "").strip()
-    momento = datetime.now().strftime("%d/%m/%Y %H:%M")
+    momento = ahora_colombia().strftime("%d/%m/%Y %H:%M")
     orden = orden_para_aviso(df)
     total = len(orden)
 

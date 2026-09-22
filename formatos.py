@@ -31,9 +31,9 @@ Estilos disponibles:
 
 from __future__ import annotations
 
-from datetime import datetime
-
 import pandas as pd
+
+from core import ahora_colombia
 
 # Estilos validos (usados por --estilo en la linea de comandos)
 ESTILO_TABLA = "tabla"
@@ -154,7 +154,7 @@ def _linea_resumen(df: pd.DataFrame) -> str:
 def _cabecera(titulo: str, df: pd.DataFrame, con_resumen: bool = True) -> list[str]:
     lineas = [
         f"<b>🛰️ {_escapar(titulo)}</b>",
-        f"<i>Colsof / Banco Agrario — {datetime.now():%d/%m/%Y %H:%M}</i>",
+        f"<i>Colsof / Banco Agrario — {ahora_colombia():%d/%m/%Y %H:%M}</i>",
     ]
     if con_resumen:
         lineas.append(f"<b>{_linea_resumen(df)}</b>")
@@ -322,7 +322,7 @@ def formato_markdown(df: pd.DataFrame, titulo: str = "CASOS ACTIVOS") -> str:
 
     lineas = [
         f"**{titulo}**",
-        f"Colsof / Banco Agrario — {datetime.now():%d/%m/%Y %H:%M}",
+        f"Colsof / Banco Agrario — {ahora_colombia():%d/%m/%Y %H:%M}",
         "",
         "| Estado | Caso | Vencimiento | Tiempo | Tecnico | Region |",
         "|---|---|---|---|---|---|",
@@ -352,7 +352,7 @@ def formato_resumen(df: pd.DataFrame, titulo: str = "RESUMEN DE CASOS") -> str:
 
     lineas = [
         f"<b>🛰️ {_escapar(titulo)}</b>",
-        f"<i>Colsof / Banco Agrario — {datetime.now():%d/%m/%Y %H:%M}</i>",
+        f"<i>Colsof / Banco Agrario — {ahora_colombia():%d/%m/%Y %H:%M}</i>",
         "",
         f"<b>📊 Total: {len(df)} caso(s)</b>",
         "",

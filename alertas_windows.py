@@ -47,6 +47,7 @@ from core import (
     SIN_VENCIMIENTO,
     VERDE,
     ErrorLecturaExcel,
+    ahora_colombia,
     calcular_tablero,
     construir_mensaje_notificacion,
     resumen_consola,
@@ -404,7 +405,7 @@ def main(argv: list[str] | None = None) -> int:
         ok = notificar(
             "[ROJO] PRUEBA - Torre de Control SLA",
             "Si ve este mensaje, las notificaciones funcionan correctamente.\n"
-            f"Colsof - Banco Agrario\n{datetime.now():%Y-%m-%d %H:%M}",
+            f"Colsof - Banco Agrario\n{ahora_colombia():%Y-%m-%d %H:%M}",
         )
         print("Notificacion de prueba enviada." if ok else "No se pudo enviar la notificacion.")
         return 0 if ok else 1
@@ -421,7 +422,7 @@ def main(argv: list[str] | None = None) -> int:
         log.error("No se pudo leer la plantilla: %s", exc)
         return 2
 
-    momento = datetime.now()
+    momento = ahora_colombia()
     log.info("Calculo ejecutado a las %s", resultado.momentos.strftime("%Y-%m-%d %H:%M:%S"))
     for aviso in resultado.warnings:
         log.warning(_sin_emoji(aviso))

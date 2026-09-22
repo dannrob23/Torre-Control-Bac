@@ -35,7 +35,6 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime
 
 import pandas as pd
 
@@ -50,6 +49,7 @@ from core import (
     MODO_DIAS,
     MODO_VENTANA_POR_DEFECTO,
     ErrorLecturaExcel,
+    ahora_colombia,
     calcular_tablero,
 )
 from historial import CANAL_TELEGRAM, RESULTADO_FALLIDO, RESULTADO_GENERADO, Historial
@@ -157,7 +157,7 @@ def seleccionar_tecnicos(pendientes: pd.DataFrame, historial: Historial | None,
 
     # Anti-duplicado por TECNICO: si ya se le envio un aviso hace poco, se omite.
     recientes = historial.ultima_notificacion_por_tecnico()
-    limite = datetime.now() - pd.Timedelta(hours=horas_anti_duplicado)
+    limite = ahora_colombia() - pd.Timedelta(hours=horas_anti_duplicado)
 
     por_enviar: dict[str, pd.DataFrame] = {}
     omitidos: dict[str, pd.DataFrame] = {}

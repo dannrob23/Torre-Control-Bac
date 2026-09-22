@@ -26,6 +26,8 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
+from core import ahora_colombia
+
 DIR_SCRIPT = os.path.dirname(os.path.abspath(__file__))
 ARCHIVO_DB = os.path.join(DIR_SCRIPT, "historial.db")
 
@@ -117,7 +119,7 @@ class Historial:
         momento: datetime | None = None,
     ) -> None:
         """Inserta una notificacion en el historial."""
-        momento = momento or datetime.now()
+        momento = momento or ahora_colombia()
         fila = (
             momento.strftime("%Y-%m-%d %H:%M:%S"),
             str(caso),
@@ -147,7 +149,7 @@ class Historial:
         """Registra en lote todas las filas de un DataFrame. Devuelve cuantas inserto."""
         if df is None or df.empty:
             return 0
-        momento = momento or datetime.now()
+        momento = momento or ahora_colombia()
         insertadas = 0
         for _, fila in df.iterrows():
             self.registrar(
@@ -178,7 +180,7 @@ class Historial:
         Permite que una ejecucion cada 15 min no repita 226 notificaciones
         cada vez: solo avisa de lo nuevo o de lo que cambio de estado.
         """
-        momento = momento or datetime.now()
+        momento = momento or ahora_colombia()
         desde = (momento - timedelta(minutes=minutos)).strftime("%Y-%m-%d %H:%M:%S")
         try:
             with self._conexion() as cx:
@@ -201,7 +203,7 @@ class Historial:
         Con esto se evita repetir el aviso si el color no cambio, pero SI se
         vuelve a notificar cuando un caso empeora (VERDE -> AMARILLO -> ...).
         """
-        momento = momento or datetime.now()
+        momento = momento or ahora_colombia()
         desde = (momento - timedelta(minutes=minutos)).strftime("%Y-%m-%d %H:%M:%S")
         try:
             with self._conexion() as cx:
@@ -353,7 +355,7 @@ class Historial:
         Por defecto no cuenta los intentos fallidos: "veces notificado" debe
         reflejar avisos que realmente le llegaron.
         """
-        momento = momento or datetime.now()
+        momento = momento or ahora_colombia()
         inicio = momento.strftime("%Y-%m-%d 00:00:00")
         fin = momento.strftime("%Y-%m-%d 23:59:59")
         try:
@@ -440,7 +442,7 @@ class Historial:
 
     def purgar(self, dias: int = 180) -> int:
         """Elimina registros mas antiguos que N dias. Devuelve cuantas filas borro."""
-        limite = (datetime.now() - timedelta(days=dias)).strftime("%Y-%m-%d %H:%M:%S")
+        limite = (ahora_colombia() - timedelta(days=dias)).strftime("%Y-%m-%d %H:%M:%S")
         try:
             with self._conexion() as cx:
                 cur = cx.execute("DELETE FROM notificaciones WHERE fecha_hora < ?", (limite,))

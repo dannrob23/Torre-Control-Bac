@@ -30,7 +30,6 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
-from datetime import datetime
 from tkinter import ttk, messagebox, scrolledtext
 
 import pandas as pd
@@ -49,6 +48,7 @@ from core import (
     TODOS_LOS_ESTADOS,
     VERDE,
     ErrorLecturaExcel,
+    ahora_colombia,
     calcular_tablero,
     construir_mensaje_notificacion,
     metricas_por_tecnico,
@@ -920,7 +920,7 @@ class TorreControlApp:
             )
             return 0
 
-        momento = datetime.now()
+        momento = ahora_colombia()
         registrados = 0
         for _, fila in df_casos.iterrows():
             historial.registrar(
@@ -1066,7 +1066,7 @@ class TorreControlApp:
             self._actualizar_hora()
             self.lbl_status.config(
                 text=(
-                    f"Ultima actualizacion: {datetime.now():%Y-%m-%d %H:%M:%S} | "
+                    f"Ultima actualizacion: {ahora_colombia():%Y-%m-%d %H:%M:%S} | "
                     f"Casos activos: {resultado.total_activos} de {resultado.total_hoja} | "
                     f"En ventana ({resultado.dias_ventana} dias + vencidos): "
                     f"{resultado.total_en_ventana}"
@@ -1500,7 +1500,7 @@ class TorreControlApp:
             messagebox.showwarning("Sin datos", "No hay datos para exportar.")
             return
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        timestamp = ahora_colombia().strftime("%Y%m%d_%H%M")
         ruta_salida = os.path.join(DIR_SCRIPT, f"casos_sla_{timestamp}.csv")
         try:
             self._df.to_csv(ruta_salida, index=False, encoding="utf-8-sig")
@@ -1514,7 +1514,7 @@ class TorreControlApp:
         if self._metricas is None or self._metricas.empty:
             messagebox.showwarning("Sin datos", "No hay metricas por tecnico para exportar.")
             return
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        timestamp = ahora_colombia().strftime("%Y%m%d_%H%M")
         ruta_salida = os.path.join(DIR_SCRIPT, f"metricas_por_tecnico_{timestamp}.csv")
         try:
             self._metricas.to_csv(ruta_salida, index=False, encoding="utf-8-sig")
@@ -1530,7 +1530,7 @@ class TorreControlApp:
                 "Sin datos", "No hay notificaciones registradas para exportar."
             )
             return
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        timestamp = ahora_colombia().strftime("%Y%m%d_%H%M")
         ruta_salida = os.path.join(DIR_SCRIPT, f"notificaciones_{timestamp}.csv")
         try:
             self._hist_detalle.to_csv(ruta_salida, index=False, encoding="utf-8-sig")
@@ -1544,7 +1544,7 @@ class TorreControlApp:
     # ------------------------------------------------------------------
 
     def _actualizar_hora(self) -> None:
-        self.lbl_hora.config(text=f"⏰ {datetime.now():%Y-%m-%d %H:%M:%S}")
+        self.lbl_hora.config(text=f"⏰ {ahora_colombia():%Y-%m-%d %H:%M:%S}")
 
     def _acerca_de(self) -> None:
         messagebox.showinfo(

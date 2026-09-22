@@ -32,9 +32,10 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
 
 import pandas as pd
+
+from core import ahora_colombia
 
 try:
     import requests
@@ -640,7 +641,7 @@ def construir_tabla(df: pd.DataFrame, titulo: str = "ESTADO DE CASOS") -> str:
     separador = "  ".join("-" * a for a in anchos)
     cuerpo = [linea(encabezados), separador] + [linea(f) for f in filas]
 
-    momento = datetime.now().strftime("%d/%m/%Y %H:%M")
+    momento = ahora_colombia().strftime("%d/%m/%Y %H:%M")
     resumen = _resumen_texto(df)
 
     return (
@@ -694,7 +695,7 @@ def construir_tabla_plana(df: pd.DataFrame, titulo: str = "ESTADO DE CASOS") -> 
 
     trabajo = df.copy()
     trabajo["TIEMPO_CLAVE"] = _columna_tiempo(trabajo)
-    momento = datetime.now().strftime("%d/%m/%Y %H:%M")
+    momento = ahora_colombia().strftime("%d/%m/%Y %H:%M")
 
     lineas = [
         f"{titulo} — Colsof / Banco Agrario",
@@ -1024,7 +1025,7 @@ def main(argv: list[str] | None = None) -> int:
         n = enviar_a_todos(
             "<b>✅ Prueba de conexion</b>\n"
             "Torre de Control SLA — Colsof / Banco Agrario\n"
-            f"<i>{datetime.now():%d/%m/%Y %H:%M:%S}</i>\n\n"
+            f"<i>{ahora_colombia():%d/%m/%Y %H:%M:%S}</i>\n\n"
             "Si ve este mensaje, el bot esta bien configurado."
         )
         print(f"\nDestinos alcanzados: {n}/{len(destinos)}")

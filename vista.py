@@ -32,6 +32,7 @@ from core import (
     COL_CASO,
     COL_CIUDAD,
     ICONO_ESTADO,
+    ahora_colombia,
     NARANJA,
     ORDEN_ESTADO,
     REGION_DESCONOCIDA,
@@ -168,7 +169,7 @@ def aplicar_filtro_fecha(
     if preset == PRESET_TODAS:
         return df, PRESET_TODAS, 0
 
-    ahora = ahora or datetime.now()
+    ahora = ahora or ahora_colombia()
     hoy = ahora.date()
     fechas = pd.to_datetime(df[columna], errors="coerce")
     sin_fecha = int(fechas.isna().sum())

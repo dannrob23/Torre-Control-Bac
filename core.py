@@ -21,8 +21,9 @@ import sys
 import time
 import unicodedata
 import warnings
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+from dataclasses import dataclass, field
 
 if sys.platform == "win32":
     try:
@@ -178,6 +179,14 @@ def _cargar_regiones_anonimas() -> None:
         break
 
 REGION_DESCONOCIDA = "SIN REGION"
+
+ZONA_COLOMBIA = ZoneInfo("America/Bogota")
+
+
+def ahora_colombia() -> datetime:
+    """Hora local de Colombia, naive y compatible con fechas de Excel."""
+    return datetime.now(ZONA_COLOMBIA).replace(tzinfo=None)
+
 
 log = logging.getLogger("torre_control")
 
@@ -583,7 +592,7 @@ def calcular_tablero(
 
     Args:
         ruta:         ruta del Excel (None = autodescubrir)
-        momento:      fecha/hora de referencia (por defecto datetime.now())
+        momento:      fecha/hora de referencia (por defecto hora colombiana)
         df_crudo:     DataFrame ya leido (evita releer el archivo)
         dias_ventana: cuantos dias calendario abarca la ventana
         modo_ventana: MODO_DIAS (por defecto) = ultimos N dias ACOTADO.
@@ -592,7 +601,7 @@ def calcular_tablero(
     Returns:
         Resultado con df_completo (todo) y df (ventana de notificacion).
     """
-    momento = momento or datetime.now()
+    momento = momento or ahora_colombia()
     avisos: list[str] = []
 
     df = df_crudo if df_crudo is not None else leer_casos(ruta)

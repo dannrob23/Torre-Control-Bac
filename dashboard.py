@@ -52,6 +52,7 @@ from core import (
     TODOS_LOS_ESTADOS,
     VERDE,
     ErrorLecturaExcel,
+    ahora_colombia,
     calcular_tablero,
     localizar_excel,
     metricas_por_tecnico,
@@ -376,7 +377,7 @@ def _registrar_casos(historial, df_casos: pd.DataFrame, canal: str, detalle: str
     if historial is None or df_casos is None or df_casos.empty:
         return 0
 
-    momento = datetime.now()
+    momento = ahora_colombia()
     registrados = 0
     for _, fila in df_casos.iterrows():
         historial.registrar(
@@ -947,7 +948,7 @@ def render_notificaciones_pendientes(
         st.download_button(
             "⬇️ Descargar pendientes por técnico (CSV)",
             data=resumen.to_csv(index=False, na_rep="").encode("utf-8-sig"),
-            file_name=f"pendientes_por_tecnico_{datetime.now():%Y%m%d_%H%M}.csv",
+            file_name=f"pendientes_por_tecnico_{ahora_colombia():%Y%m%d_%H%M}.csv",
             mime="text/csv",
             key="descarga_pendientes_tecnico",
         )
@@ -1068,7 +1069,7 @@ def main() -> None:
         st.divider()
 
     # --- Localización del archivo o subida manual -------------------------
-    momento = datetime.now()
+    momento = ahora_colombia()
 
     origen_subido = None
     with st.sidebar:

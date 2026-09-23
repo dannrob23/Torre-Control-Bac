@@ -1624,6 +1624,218 @@ def render_plan_trabajo() -> None:
         )
 
 
+# =========================================================================
+# PESTAÑA: 📌 Casos_Ven — histórico de casos vencidos
+# =========================================================================
+
+def render_casos_ven() -> None:
+    """
+    Pestaña con el listado completo de la hoja Casos_Ven.
+
+    Muestra los totales arriba y el detalle caso a caso debajo, con filtros y
+    descarga. Es el histórico de vencidos del mes (abiertos y cerrados), que es
+    una población distinta de las hojas diarias.
+    """
+    faltantes = _faltantes_de_plan()
+    if faltantes:
+        _aviso_plan_desactualizado(faltantes)
+        return
+
+    st.markdown("#### 📌 Casos_Ven — casos vencidos del mes")
+    st.caption(
+        "Listado completo de la hoja `Casos_Ven`: todos los casos vencidos del "
+        "mes, estén abiertos o ya cerrados."
+    )
+
+    with st.sidebar:
+        st.divider()
+        st.subheader("📌 Cargar Plan de Trabajo")
+        st.caption(
+            "El mismo archivo mensual del plan. Se procesa en memoria; no se "
+            "guarda en el servidor."
+        )
+        subido = st.file_uploader(
+            "Plan de Trabajo (.xlsx)", type=["xlsx"], key="uploader_vencidos"
+        )
+
+    if subido is not None:
+        contenido = subido.getvalue()
+        nombre = subido.name
+    elif st.session_state.get("plan_bytes"):
+        contenido = st.session_state["plan_bytes"]
+        nombre = st.session_state.get("plan_nombre", "Plan de Trabajo.xlsx")
+        st.success(f"📄 Usando el Plan de Trabajo cargado arriba: `{nombre}`", icon="✅")
+    else:
+        st.info(
+            "**Suba el archivo del Plan de Trabajo** desde la barra lateral.",
+            icon="📤",
+        )
+        st.markdown(
+            """
+            **Qué verá aquí**
+
+            - Los **totales** por mes, por técnico y por culpa.
+            - El **detalle caso a caso** con ubicación, fecha, técnico y
+              justificación del vencimiento.
+            - Filtros y descarga en CSV.
+            """
+        )
+        return
+
+    with st.spinner("Leyendo la hoja Casos_Ven..."):
+        try:
+            vista = plan.vista_vencidos(contenido)
+        except plan.ErrorPlan as exc:
+            st.error("❌ No se pudo leer la hoja Casos_Ven.")
+            st.code(str(exc))
+            return
+        except Exception as exc:
+            st.error("❌ Error inesperado al leer el archivo.")
+            st.code(f"{type(exc).__name__}: {exc}")
+            return
+
+    casos = vista["casos"]
+    meta = vista["meta"]
+    conc = vista["conciliacion"]
+
+    if casos.empty:
+        st.warning("La hoja Casos_Ven no tiene casos utilizables.")
+        return
+
+    # --- Conciliación: por qué el total no es el número de filas ----------
+    if conc["descartados"] or conc["fechas_corregidas"]:
+        partes = []
+        if conc["descartados"]:
+            partes.append(
+                f"**{conc['descartados']} fila(s) descartada(s)**: "
+                "duplicados del mismo caso y una fila con los datos corridos."
+            )
+        if conc["fechas_corregidas"]:
+            partes.append(
+                f"**{conc['fechas_corregidas']} fecha(s) corregida(s)**: venían "
+                "con mes y día intercambiados."
+            )
+        st.info(
+            f"Se leyeron **{conc['filas_leidas']} filas** y quedaron "
+            f"**{vista['total']} casos únicos**.\n\n" + "\n\n".join(partes),
+            icon="🔎",
+        )
+
+    # --- KPIs -------------------------------------------------------------
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Casos en la hoja", conc["filas_leidas"])
+    k2.metric("Casos únicos", vista["total"])
+    k3.metric("Técnicos", meta["tecnicos"])
+    k4.metric("Meses", meta["meses"])
+
+    st.divider()
+
+    # --- Totales ----------------------------------------------------------
+    st.markdown("##### 📊 Totales")
+    t1, t2 = st.columns([1, 1])
+    with t1:
+        st.markdown("**Por mes de creación**")
+        tabla_mes = pd.DataFrame(vista["por_mes"]).rename(columns={
+            "etiqueta": "Mes", "casos": "Casos",
+        })[["Mes", "Casos"]]
+        st.dataframe(tabla_mes, width="stretch", hide_index=True, height=260)
+    with t2:
+        st.markdown("**Por culpa**")
+        if vista["por_culpa"]:
+            tabla_culpa = pd.DataFrame(vista["por_culpa"]).rename(columns={
+                "culpa": "Culpa", "casos": "Casos",
+            })
+            st.dataframe(tabla_culpa, width="stretch", hide_index=True, height=260)
+        else:
+            st.caption("La hoja no trae la columna de culpa.")
+
+    st.markdown("**Por técnico**")
+    datos_tec = [
+        {"etiqueta": t["tecnico"], "casos": t["casos"]}
+        for t in reversed(vista["por_tecnico"][:15])
+    ]
+    if datos_tec:
+        grafico = _grafico_horizontal(datos_tec, "Top 15 por casos", "#C2410C")
+        if grafico is not None:
+            st.altair_chart(grafico, width="stretch")
+
+    if vista["por_categoria"]:
+        st.markdown("**Por categoría**")
+        st.dataframe(
+            pd.DataFrame(vista["por_categoria"]).rename(columns={
+                "categoria": "Categoría", "casos": "Casos",
+            }),
+            width="stretch", hide_index=True,
+        )
+
+    st.divider()
+
+    # --- Detalle ----------------------------------------------------------
+    st.markdown("##### 📋 Detalle caso a caso")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        meses = ["(todos)"] + [m["etiqueta"] for m in vista["por_mes"]]
+        mes_sel = st.selectbox("Mes de creación", meses, key="ven_mes")
+    with c2:
+        tecnicos = ["(todos)"] + [t["tecnico"] for t in vista["por_tecnico"] if t["tecnico"]]
+        tec_sel = st.selectbox("Técnico", tecnicos, key="ven_tec")
+    with c3:
+        culpas = ["(todas)"] + [c["culpa"] for c in vista["por_culpa"] if c["culpa"]]
+        culpa_sel = st.selectbox("Culpa", culpas, key="ven_culpa")
+
+    filtrado = casos.copy()
+    if mes_sel != "(todos)":
+        etiqueta_a_mes = {m["etiqueta"]: m["mes"] for m in vista["por_mes"]}
+        filtrado = filtrado[filtrado[plan.COL_MES_CREACION] == etiqueta_a_mes[mes_sel]]
+    if tec_sel != "(todos)":
+        filtrado = filtrado[filtrado[plan.COL_TECNICO] == tec_sel]
+    if culpa_sel != "(todas)":
+        filtrado = filtrado[filtrado[plan.COL_CULPA] == culpa_sel]
+
+    st.caption(f"Mostrando **{len(filtrado)}** de {vista['total']} casos.")
+
+    columnas = {
+        plan.COL_CASO: "Caso",
+        plan.COL_UBICACION: "Ubicación",
+        plan.COL_FECHA_CREACION: "Fecha creación",
+        plan.COL_TECNICO: "Técnico",
+        plan.COL_CULPA: "Culpa",
+        plan.COL_CATEGORIA: "Categoría",
+        plan.COL_JUSTIFICACION: "Justificación del vencimiento",
+        plan.COL_DIAS_ABIERTO: "Días abierto",
+    }
+    presentes = [c for c in columnas if c in filtrado.columns]
+    detalle = filtrado[presentes].rename(columns=columnas)
+    if "Fecha creación" in detalle.columns:
+        detalle["Fecha creación"] = pd.to_datetime(
+            detalle["Fecha creación"], errors="coerce"
+        ).dt.strftime("%d/%m/%Y")
+    if "Días abierto" in detalle.columns:
+        detalle["Días abierto"] = detalle["Días abierto"].round(0).astype("Int64")
+
+    st.dataframe(detalle, width="stretch", hide_index=True, height=460)
+
+    d1, d2 = st.columns([1, 1])
+    with d1:
+        st.download_button(
+            "⬇️ Descargar los casos filtrados (CSV)",
+            data=detalle.to_csv(index=False, na_rep="").encode("utf-8-sig"),
+            file_name="casos_ven.csv",
+            mime="text/csv",
+            key="descarga_vencidos",
+        )
+    with d2:
+        st.download_button(
+            "⬇️ Descargar todos los totales (CSV)",
+            data=(
+                pd.DataFrame(vista["por_mes"]).to_csv(index=False).encode("utf-8-sig")
+            ),
+            file_name="casos_ven_totales.csv",
+            mime="text/csv",
+            key="descarga_vencidos_totales",
+        )
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Torre de Control SLA - Colsof",
@@ -1829,12 +2041,14 @@ def main() -> None:
     # =====================================================================
     # NAVEGACIÓN PRINCIPAL EN PESTAÑAS (ST.TABS)
     # =====================================================================
-    tab_despacho, tab_explorador, tab_analitica, tab_historial, tab_plan, tab_integridad = st.tabs([
+    (tab_despacho, tab_explorador, tab_analitica, tab_historial,
+     tab_plan, tab_vencidos, tab_integridad) = st.tabs([
         "🎯 Despacho Operativo",
         "📋 Explorador de Casos & SLA",
         "📊 Analítica & Técnicos",
         "📜 Historial & Auditoría",
         "🗂️ Plan de Trabajo & ANS",
+        "📌 Casos_Ven (vencidos)",
         "🔍 Integridad de datos",
     ])
 
@@ -2073,7 +2287,13 @@ def main() -> None:
         render_plan_trabajo()
 
     # ---------------------------------------------------------------------
-    # PESTANA 6: INTEGRIDAD DE DATOS
+    # PESTANA 6: CASOS_VEN (HISTORICO DE VENCIDOS)
+    # ---------------------------------------------------------------------
+    with tab_vencidos:
+        render_casos_ven()
+
+    # ---------------------------------------------------------------------
+    # PESTANA 7: INTEGRIDAD DE DATOS
     # ---------------------------------------------------------------------
     with tab_integridad:
         render_integridad(df_crudo, df_completo, nombre_archivo)

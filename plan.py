@@ -1034,3 +1034,170 @@ def resumen_para_correo(vista: dict) -> str:
         partes.append(desglose)
     partes.append(f"Técnicos con casos activos: {meta['tecnicos']}")
     return "\n".join(partes)
+
+# ===========================================================================
+# CASOS_VEN — listado completo de casos vencidos
+# ===========================================================================
+#
+# La hoja Casos_Ven es el HISTORICO de casos vencidos del mes: incluye tanto los
+# que siguen abiertos como los que ya se cerraron. Es una poblacion distinta de
+# las hojas diarias, que son la foto de los casos EN CURSO de un dia.
+#
+# Aqui se muestra completa, con su detalle caso a caso y sus totales.
+
+COL_FECHA_CORREGIDA = "FECHA_CORREGIDA"
+COL_MES_CREACION = "MES_CREACION"
+COL_ANO_MES = "ANO_MES"
+
+# Variantes de CULPA que son errores de digitacion y se agrupan.
+NORMALIZAR_CULPA_VEN = {
+    "BANCO?": "BANCO",
+    "BANCOOOOOO": "BANCO",
+    "BANCOOOO": "BANCO",
+    "MESA": "MESA-COLSOF",
+}
+
+
+def _limpiar_texto(serie: pd.Series) -> pd.Series:
+    """Trim y colapsa espacios; deja el texto presentable en pantalla."""
+    return (
+        serie.astype(str)
+        .str.replace("\xa0", " ", regex=False)
+        .str.replace(r"\s+", " ", regex=True)
+        .str.strip()
+        .replace({"nan": "", "None": "", "NaT": ""})
+    )
+
+
+def vista_vencidos(
+    archivo: str | bytes,
+    *,
+    hoja: str = HOJA_VENCIDOS,
+    corregir: bool = True,
+) -> dict:
+    """
+    Arma el listado completo de la hoja Casos_Ven con sus totales.
+
+    Parametros
+    ----------
+    corregir : si es ``True`` (por defecto) las fechas de creacion se contrastan
+        contra el modelo de la secuencia de IDs y se corrigen las que venian con
+        mes y dia intercambiados. Si es ``False`` se dejan tal como estan.
+
+    Devuelve un diccionario con:
+
+      ``casos``       una fila por caso unico, con fecha, mes, tecnico, culpa y
+                      justificacion ya limpias.
+      ``total``       numero de casos unicos.
+      ``por_mes``     lista de ``{"mes", "ano_mes", "etiqueta", "casos"}``.
+      ``por_tecnico`` lista de ``{"tecnico", "casos"}``.
+      ``por_culpa``   lista de ``{"culpa", "casos"}``.
+      ``por_categoria`` lista de ``{"categoria", "casos"}``.
+      ``conciliacion``dict con el desglose de la lectura.
+    """
+    if isinstance(archivo, (bytes, bytearray)):
+        datos = bytes(archivo)
+    else:
+        with open(archivo, "rb") as fh:
+            datos = fh.read()
+
+    info = reconocer_tipo(datos)
+    hoja_real = next(
+        (h for h in info["hojas"] if normalizar(h) == normalizar(hoja)), None
+    )
+    if hoja_real is None:
+        raise ErrorPlan(
+            "El archivo no tiene la hoja '" + hoja + "'. Hojas encontradas: "
+            + ", ".join(map(str, info["hojas"][:8]))
+        )
+
+    crudo = leer_vencidos(datos, hoja=hoja_real)
+    filas_leidas = len(crudo)
+
+    # --- fecha de creacion -------------------------------------------------
+    crudo[COL_FECHA_CREACION] = pd.to_datetime(
+        crudo[COL_FECHA_CREACION], errors="coerce", format="mixed", dayfirst=False
+    )
+    if corregir:
+        try:
+            cosecha, _ = _cosecha_cacheada(datos)
+            modelos = modelo_ids_a_fecha(cosecha)
+            corregida = corregir_fechas(
+                crudo, COL_FECHA_CREACION, modelos, columna_id=COL_CASO
+            )
+            crudo[COL_FECHA_CORREGIDA] = corregida != crudo[COL_FECHA_CREACION]
+            crudo[COL_FECHA_CREACION] = corregida
+        except Exception:
+            # Sin cosecha no hay modelo: se dejan las fechas como estan.
+            crudo[COL_FECHA_CORREGIDA] = False
+    else:
+        crudo[COL_FECHA_CORREGIDA] = False
+
+    # --- deduplicar y quitar la fila desplazada ----------------------------
+    casos = crudo[~crudo["FILA_DESALINEADA"]].copy()
+    casos = casos.drop_duplicates(subset=[COL_CASO], keep="first")
+    descartados = filas_leidas - len(casos)
+
+    # --- columnas presentables --------------------------------------------
+    for col in (COL_UBICACION, COL_TECNICO, COL_JUSTIFICACION):
+        if col in casos.columns:
+            casos[col] = _limpiar_texto(casos[col])
+    for col in (COL_CULPA, COL_CATEGORIA):
+        if col in casos.columns:
+            casos[col] = _limpiar_texto(casos[col]).replace(NORMALIZAR_CULPA_VEN)
+
+    casos[COL_MES_CREACION] = casos[COL_FECHA_CREACION].dt.strftime("%Y-%m")
+    casos[COL_ANO_MES] = casos[COL_FECHA_CREACION].dt.to_period("M")
+    casos[COL_DIAS_ABIERTO] = (
+        pd.Timestamp.now().normalize() - casos[COL_FECHA_CREACION]
+    ).dt.total_seconds() / 86400
+
+    def etiqueta_mes(periodo) -> str:
+        if pd.isna(periodo):
+            return "Sin fecha"
+        return _ETIQUETA_MES.get(periodo.month, str(periodo.month)) + " " + str(periodo.year)
+
+    # --- totales ----------------------------------------------------------
+    por_mes = []
+    for periodo, grupo in casos.groupby(COL_ANO_MES, dropna=False):
+        por_mes.append({
+            "mes": str(periodo) if pd.notna(periodo) else "",
+            "etiqueta": etiqueta_mes(periodo),
+            "casos": int(len(grupo)),
+        })
+    por_mes.sort(key=lambda d: d["mes"] or "9999")
+
+    def ranking(columna: str, etiqueta: str) -> list[dict]:
+        if columna not in casos.columns:
+            return []
+        serie = casos[columna].replace({"": "(sin dato)"})
+        conteo = serie.value_counts()
+        return [{etiqueta: str(k), "casos": int(v)} for k, v in conteo.items()]
+
+    conciliacion = {
+        "filas_leidas": int(filas_leidas),
+        "descartados": int(descartados),
+        "sin_fecha": int(casos[COL_FECHA_CREACION].isna().sum()),
+        "fechas_corregidas": int(casos[COL_FECHA_CORREGIDA].sum()),
+        "sin_tecnico": int((casos[COL_TECNICO] == "").sum()) if COL_TECNICO in casos.columns else 0,
+        "hoja": hoja_real,
+    }
+
+    return {
+        "casos": casos,
+        "total": int(len(casos)),
+        "por_mes": por_mes,
+        "por_tecnico": ranking(COL_TECNICO, "tecnico"),
+        "por_culpa": ranking(COL_CULPA, "culpa"),
+        "por_categoria": ranking(COL_CATEGORIA, "categoria"),
+        "conciliacion": conciliacion,
+        "meta": {
+            "hoja": hoja_real,
+            "corregido": bool(corregir),
+            "meses": len(por_mes),
+            "tecnicos": int(casos[COL_TECNICO].replace({"": pd.NA}).nunique())
+            if COL_TECNICO in casos.columns else 0,
+            "culpas": int(casos[COL_CULPA].replace({"": pd.NA}).nunique())
+            if COL_CULPA in casos.columns else 0,
+        },
+    }

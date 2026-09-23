@@ -1212,7 +1212,7 @@ def render_integridad(df_crudo, df_completo, nombre_archivo: str = "") -> None:
 def _fmt_mes(periodo: str) -> str:
     """'2026-08' -> 'Agosto'."""
     try:
-        return plan._ETIQUETA_MES[int(str(periodo)[-2:])]
+        return ETIQUETA_MES_TABLERO[int(str(periodo)[-2:])]
     except (ValueError, KeyError, IndexError):
         return str(periodo)
 
@@ -1280,6 +1280,77 @@ def _grafico_semanal(datos: list[dict], titulo: str):
     )
 
 
+# Estados que cuentan como "en curso" para el tablero gerencial. Se declaran
+# aqui, y no se leen de plan.py, a proposito: este modulo puede quedar cacheado
+# en el servidor y desincronizarse de dashboard.py. Con la constante local, el
+# tablero sigue funcionando aunque plan.py venga de una version anterior.
+ESTADOS_EN_CURSO_TABLERO = ("EN CURSO", "TRABAJO EN CURSO")
+
+# Nombres de la interfaz para cada estado.
+ETIQUETA_ESTADO_TABLERO = {
+    "EN CURSO": "En curso",
+    "TRABAJO EN CURSO": "Trabajo en curso",
+    "SUSPENDIDO": "Suspendido",
+    "READY": "Ready",
+    "WORK IN PROGRESS": "Work in progress",
+    "PREPARADO": "Preparado",
+    "ASIGNADO": "Asignado",
+    "PENDIENTE": "Pendiente",
+    "PENDING": "Pending",
+    "CATEGORIZADO": "Categorizado",
+}
+
+# Nombres de mes para las etiquetas de los graficos.
+ETIQUETA_MES_TABLERO = {
+    1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio",
+    7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre",
+    12: "Diciembre",
+}
+
+# Lo minimo que debe exponer plan.py para que la pestana funcione.
+PLAN_REQUERIDO = (
+    "vista_gerencial", "reconocer_tipo", "hojas_diarias", "resumen_para_correo",
+    "normalizar", "ErrorPlan", "COL_ID_DIARIO", "COL_DIAS_ABIERTO",
+    "COL_ESTADO_ETIQUETA", "COL_ESTADO_DIARIO",
+)
+
+
+def _faltantes_de_plan() -> list:
+    """Nombres que dashboard.py necesita y plan.py no expone."""
+    return [n for n in PLAN_REQUERIDO if not hasattr(plan, n)]
+
+
+def _aviso_plan_desactualizado(faltantes) -> None:
+    """Explica el problema en lugar de dejar caer un AttributeError."""
+    st.error(
+        "\u274c **El servidor tiene una versión antigua del módulo `plan.py`.** "
+        "Es un problema de caché del servidor, no del archivo que subiste.",
+        icon="\U0001f9e9",
+    )
+    st.markdown(
+        "Faltan estas funciones en el módulo cargado:\n\n"
+        + "\n".join("- `plan." + n + "`" for n in faltantes)
+        + "\n\n**Solución:** en Streamlit Cloud, entra a *Manage app* "
+        "\u2192 menú \u22ee \u2192 **Reboot**. Si sigue igual, usa "
+        "*Manage app* \u2192 \u22ee \u2192 **Delete app** y vuelve a "
+        "desplegar, que limpia la caché por completo."
+    )
+
+
+def _etiqueta_estado_tablero(valor) -> str:
+    """Nombre presentable del estado, sin depender de plan.py."""
+    clave = normalizar_generico(valor)
+    return ETIQUETA_ESTADO_TABLERO.get(clave, str(valor).strip() or "Sin estado")
+
+
+def normalizar_generico(valor) -> str:
+    """Normalizacion de texto local, por si plan.py viene desactualizado."""
+    if hasattr(plan, "normalizar"):
+        return plan.normalizar(valor)
+    texto_valor = str(valor if valor is not None else "").strip().upper()
+    return " ".join(texto_valor.split())
+
+
 def render_plan_trabajo() -> None:
     """
     Pestaña gerencial del Plan de Trabajo: casos en curso por técnico.
@@ -1288,6 +1359,11 @@ def render_plan_trabajo() -> None:
     quién los tiene. Los datos salen de las hojas diarias del Plan de Trabajo,
     no de la hoja de vencidos.
     """
+    faltantes = _faltantes_de_plan()
+    if faltantes:
+        _aviso_plan_desactualizado(faltantes)
+        return
+
     st.markdown("#### 🗂️ Plan de Trabajo — Casos en curso")
     st.caption(
         "Resumen para gerencia, con corte a la fecha que elijas. Los datos salen "
@@ -1372,9 +1448,9 @@ def render_plan_trabajo() -> None:
 
         st.markdown("**Estados que cuentan como en curso**")
         incluir = {}
-        for estado in plan.ESTADOS_EN_CURSO:
+        for estado in ESTADOS_EN_CURSO_TABLERO:
             incluir[estado] = st.checkbox(
-                plan._etiqueta_estado(estado), value=True, key=f"est_{estado}"
+                _etiqueta_estado_tablero(estado), value=True, key=f"est_{estado}"
             )
         estados_elegidos = tuple(e for e, v in incluir.items() if v)
         if not estados_elegidos:

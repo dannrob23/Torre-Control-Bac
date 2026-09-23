@@ -30,6 +30,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -95,8 +96,6 @@ def dibujar_graficos_altair(filtrado: pd.DataFrame) -> None:
     if filtrado is None or filtrado.empty:
         st.info("No hay datos para generar los gráficos.")
         return
-
-    import altair as alt
 
     g1, g2 = st.columns(2)
     with g1:
@@ -1207,363 +1206,345 @@ def render_integridad(df_crudo, df_completo, nombre_archivo: str = "") -> None:
 
 
 # =========================================================================
-# PLAN DE TRABAJO — cartera vencida, envejecimiento y ANS
+# PLAN DE TRABAJO — tablero gerencial de casos en curso
 # =========================================================================
 
-def _cargar_plan(contenido: bytes, firma: int, momento_iso: str):
-    """Lee y analiza el Plan de Trabajo (cacheado por firma del archivo)."""
-    return plan.analizar(contenido, momento=pd.Timestamp(momento_iso))
+def _fmt_mes(periodo: str) -> str:
+    """'2026-08' -> 'Agosto'."""
+    try:
+        return plan._ETIQUETA_MES[int(str(periodo)[-2:])]
+    except (ValueError, KeyError, IndexError):
+        return str(periodo)
 
 
-def _colores_tramo(serie: pd.Series) -> list[str]:
-    """
-    Color de fondo por tramo, para pintar la columna de ANS en la tabla.
-
-    Se devuelve el color CSS directo (no una clase) porque la tabla la dibuja
-    st.dataframe con su propio Styler, que no ve el CSS de estilos_css.
-    """
-    mapa = {
-        plan.TRAMO_VERDE: "#DCFCE7",
-        plan.TRAMO_AMARILLO: "#FEF9C3",
-        plan.TRAMO_NARANJA: "#FFEDD5",
-        plan.TRAMO_ROJO: "#FEE2E2",
-        plan.ANS_EN_PLAZO: "#DCFCE7",
-        plan.ANS_1_7: "#FEF9C3",
-        plan.ANS_8_30: "#FFEDD5",
-        plan.ANS_31_90: "#FEE2E2",
-        plan.ANS_MAS_90: "#FECACA",
-    }
-    return [mapa.get(v, "") for v in serie]
-
-
-def _barras_tramo(conteos: dict, orden: list, titulo: str) -> None:
-    """Barra horizontal proporcional por tramo, sin dependencias de graficos."""
-    total = sum(conteos.values()) or 1
-    st.markdown(f"**{titulo}**")
-    for tramo in orden:
-        n = conteos.get(tramo, 0)
-        pct = n / total * 100
-        color = {
-            plan.TRAMO_VERDE: "#15803D", plan.TRAMO_AMARILLO: "#A16207",
-            plan.TRAMO_NARANJA: "#C2410C", plan.TRAMO_ROJO: "#B91C1C",
-            plan.ANS_EN_PLAZO: "#15803D", plan.ANS_1_7: "#A16207",
-            plan.ANS_8_30: "#C2410C", plan.ANS_31_90: "#B91C1C",
-            plan.ANS_MAS_90: "#8B0000",
-        }.get(tramo, "#6B7280")
-        st.markdown(
-            f"""<div style="margin-bottom:6px">
-              <div style="display:flex;justify-content:space-between;font-size:0.85rem">
-                <span>{tramo}</span><span><b>{n}</b> ({pct:.0f}%)</span>
-              </div>
-              <div style="background:#E5E7EB;border-radius:6px;height:10px">
-                <div style="width:{pct:.1f}%;background:{color};height:10px;border-radius:6px"></div>
-              </div></div>""",
-            unsafe_allow_html=True,
+def _grafico_barras(datos: list[dict], campo_x: str, campo_y: str,
+                    titulo: str, rotulo_x: str, rotulo_y: str, color: str):
+    """Barras verticales simples y limpias, sin ruido visual."""
+    if not datos:
+        return None
+    dfg = pd.DataFrame(datos)
+    return (
+        alt.Chart(dfg)
+        .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4, color=color)
+        .encode(
+            x=alt.X(f"{campo_x}:N", title=rotulo_x, sort=None,
+                    axis=alt.Axis(labelAngle=0, labelFontSize=12, titleFontSize=12)),
+            y=alt.Y(f"{campo_y}:Q", title=rotulo_y,
+                    axis=alt.Axis(labelFontSize=12, titleFontSize=12)),
+            tooltip=[alt.Tooltip(f"{campo_x}:N", title=rotulo_x),
+                     alt.Tooltip(f"{campo_y}:Q", title=rotulo_y)],
         )
+        .properties(title=alt.TitleParams(titulo, fontSize=15, anchor="start"),
+                    height=280)
+    )
+
+
+def _grafico_horizontal(datos: list[dict], titulo: str, color: str):
+    """Barras horizontales para rankings (se leen mejor los nombres)."""
+    if not datos:
+        return None
+    dfg = pd.DataFrame(datos)
+    return (
+        alt.Chart(dfg)
+        .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4, color=color)
+        .encode(
+            y=alt.Y("etiqueta:N", title=None, sort="-x",
+                    axis=alt.Axis(labelFontSize=12)),
+            x=alt.X("casos:Q", title="Casos",
+                    axis=alt.Axis(labelFontSize=12, titleFontSize=12)),
+            tooltip=[alt.Tooltip("etiqueta:N", title="Técnico"),
+                     alt.Tooltip("casos:Q", title="Casos")],
+        )
+        .properties(title=alt.TitleParams(titulo, fontSize=15, anchor="start"),
+                    height=max(220, 26 * len(datos) + 60))
+    )
+
+
+def _grafico_semanal(datos: list[dict], titulo: str):
+    """Evolución por semana: línea con puntos."""
+    if not datos:
+        return None
+    dfg = pd.DataFrame(datos)
+    base = alt.Chart(dfg).encode(
+        x=alt.X("etiqueta:N", title="Semana", sort=None,
+                axis=alt.Axis(labelAngle=0, labelFontSize=12, titleFontSize=12)),
+        y=alt.Y("casos:Q", title="Casos",
+                axis=alt.Axis(labelFontSize=12, titleFontSize=12)),
+        tooltip=[alt.Tooltip("etiqueta:N", title="Semana"),
+                 alt.Tooltip("casos:Q", title="Casos")],
+    )
+    linea = base.mark_line(color="#1F4E78", strokeWidth=3, point=alt.OverlayMarkDef(
+        color="#1F4E78", size=90, filled=True))
+    return linea.properties(
+        title=alt.TitleParams(titulo, fontSize=15, anchor="start"), height=280
+    )
 
 
 def render_plan_trabajo() -> None:
     """
-    Pestana del Plan de Trabajo: cartera vencida, envejecimiento, ANS por tecnico
-    y hallazgos de calidad de datos.
+    Pestaña gerencial del Plan de Trabajo: casos en curso por técnico.
 
-    Es independiente de la plantilla SLA: trabaja sobre el archivo mensual del
-    plan, que es el que trae los casos vencidos y su justificacion.
+    Responde tres preguntas y nada más: cuántos casos hay, de qué meses son y
+    quién los tiene. Los datos salen de las hojas diarias del Plan de Trabajo,
+    no de la hoja de vencidos.
     """
-    st.markdown("#### 🗂️ Plan de Trabajo — cartera vencida y ANS")
+    st.markdown("#### 🗂️ Plan de Trabajo — Casos en curso")
     st.caption(
-        "Este análisis usa el archivo mensual del Plan de Trabajo (hoja "
-        "`Casos_Ven` más las hojas diarias), no la plantilla SLA."
+        "Resumen para gerencia, con corte a la fecha que elijas. Los datos salen "
+        "de las hojas diarias del Plan de Trabajo."
     )
 
     with st.sidebar:
         st.divider()
         st.subheader("🗂️ Cargar Plan de Trabajo")
         st.caption(
-            "Excel mensual con la hoja `Casos_Ven`. Se procesa en memoria; "
-            "no se guarda en el servidor."
+            "Excel mensual del plan. Se procesa en memoria; no se guarda en el "
+            "servidor."
         )
         subido = st.file_uploader(
-            "Plan de Trabajo (.xlsx)",
-            type=["xlsx"],
-            key="uploader_plan",
+            "Plan de Trabajo (.xlsx)", type=["xlsx"], key="uploader_plan"
         )
 
     # Si el archivo se subio en el cargador principal y resulto ser un Plan de
-    # Trabajo, ya esta en session_state: no hay que pedirlo dos veces.
+    # Trabajo, ya esta en session_state: no se pide dos veces.
     if subido is not None:
         contenido = subido.getvalue()
         nombre_plan = subido.name
     elif st.session_state.get("plan_bytes"):
         contenido = st.session_state["plan_bytes"]
         nombre_plan = st.session_state.get("plan_nombre", "Plan de Trabajo.xlsx")
-        st.success(
-            f"📄 Usando el Plan de Trabajo cargado arriba: `{nombre_plan}`",
-            icon="✅",
-        )
+        st.success(f"📄 Usando el Plan de Trabajo cargado arriba: `{nombre_plan}`",
+                   icon="✅")
     else:
         contenido = None
         nombre_plan = ""
 
     if contenido is None:
         st.info(
-            "**Suba el archivo del Plan de Trabajo** desde la barra lateral para "
-            "ver los indicadores de envejecimiento y ANS."
+            "**Suba el archivo del Plan de Trabajo** desde la barra lateral.",
+            icon="📤",
         )
         st.markdown(
             """
-            **Qué encontrará aquí**
+            **Qué verá aquí**
 
-            | Bloque | Qué responde |
+            | | |
             |---|---|
-            | 🔴 ANS | Cuántos días lleva vencido cada caso y quién los acumula |
-            | ⏱️ Envejecimiento | Cuánto lleva abierto cada caso desde su creación |
-            | 👷 Por técnico | Volumen *y* gravedad de la cartera de cada uno |
-            | 🚧 Culpa | Qué proporción del vencimiento era evitable |
-            | ⏱️ Velocidad de cierre | Tiempo de cierre y cumplimiento del ANS |
-            | 📋 Calidad de datos | Fechas invertidas, duplicados y filas desalineadas |
+            | 🔢 **Cuántos casos** | Total en curso a la fecha de corte |
+            | 📅 **De qué meses** | Reparto agosto / septiembre / el que aparezca |
+            | 👷 **Quién los tiene** | Casos por técnico, de mayor a menor |
+            | 🕐 **Los más antiguos** | Los 10 que llevan más tiempo abiertos |
+            | 📋 **Resumen para correo** | Texto listo para pegar |
             """
         )
         return
 
-    import hashlib
+    # --- Controles de la barra lateral ------------------------------------
+    with st.sidebar:
+        st.markdown("**Corte y alcance**")
+        try:
+            info = plan.reconocer_tipo(contenido)
+            hojas = plan.hojas_diarias(info["hojas"])
+        except Exception as exc:
+            st.error("❌ No se pudo leer el archivo.")
+            st.code(f"{type(exc).__name__}: {exc}")
+            return
 
-    firma = int(hashlib.md5(contenido).hexdigest()[:8], 16)
-    momento = ahora_colombia()
+        if not hojas:
+            st.error(
+                "❌ El archivo no tiene hojas diarias (se esperaban nombres como "
+                "`22_Septiembre`)."
+            )
+            st.caption("Hojas encontradas: " + ", ".join(map(str, info["hojas"][:8])))
+            return
 
+        opciones = sorted(hojas.items(), key=lambda kv: kv[1], reverse=True)
+        etiqueta_a_fecha = {
+            f"{fecha:%d/%m/%Y} · {nombre}": fecha for nombre, fecha in opciones
+        }
+        elegida = st.selectbox(
+            "Fecha de corte",
+            list(etiqueta_a_fecha.keys()),
+            index=0,
+            help="Por defecto, la última hoja disponible en el archivo.",
+        )
+        corte = etiqueta_a_fecha[elegida]
+
+        st.markdown("**Estados que cuentan como en curso**")
+        incluir = {}
+        for estado in plan.ESTADOS_EN_CURSO:
+            incluir[estado] = st.checkbox(
+                plan._etiqueta_estado(estado), value=True, key=f"est_{estado}"
+            )
+        estados_elegidos = tuple(e for e, v in incluir.items() if v)
+        if not estados_elegidos:
+            st.warning("Marque al menos un estado.")
+            return
+
+    # --- Datos ------------------------------------------------------------
     try:
-        with st.spinner("Analizando el Plan de Trabajo..."):
-            resultado = _cargar_plan(contenido, firma, momento.isoformat())
+        with st.spinner("Preparando el tablero..."):
+            vista = plan.vista_gerencial(
+                contenido, corte=corte, estados=estados_elegidos
+            )
     except plan.ErrorPlan as exc:
         st.error("❌ No se pudo analizar el Plan de Trabajo.")
         st.code(str(exc))
         return
-    except Exception as exc:  # archivo corrupto, hoja ausente, etc.
+    except Exception as exc:
         st.error("❌ Error inesperado al leer el archivo.")
         st.code(f"{type(exc).__name__}: {exc}")
         return
 
-    casos = resultado["casos"]
-    tecnicos = resultado["tecnicos"]
-    meta = resultado["meta"]
-    calidad = resultado["calidad"]
+    meta = vista["meta"]
+    corte_txt = meta["corte"].strftime("%d de %B de %Y").replace(
+        "January", "enero").replace("February", "febrero").replace(
+        "March", "marzo").replace("April", "abril").replace("May", "mayo").replace(
+        "June", "junio").replace("July", "julio").replace("August", "agosto").replace(
+        "September", "septiembre").replace("October", "octubre").replace(
+        "November", "noviembre").replace("December", "diciembre")
 
-    if casos.empty:
-        st.warning("El archivo no tiene casos utilizables.")
+    st.markdown(f"##### Corte: {corte_txt}")
+
+    if vista["total"] == 0:
+        st.warning("No hay casos en curso con ese corte y esos estados.")
         return
 
-    # --- Calidad de datos: se avisa ANTES de los indicadores --------------
-    if meta["fechas_corregidas"]:
-        st.warning(
-            f"⚠️ **{meta['fechas_corregidas']} fechas venían invertidas** "
-            "(Excel leyó `DD/MM` como `MM/DD`). Se corrigieron con el modelo de "
-            "IDs de caso. Sin esta corrección la antigüedad saldría muy inflada."
-        )
-    if calidad["filas_desalineadas"] or calidad["duplicados"] or calidad["sin_fecha"]:
-        detalles = []
-        if calidad["filas_desalineadas"]:
-            detalles.append(f"{calidad['filas_desalineadas']} fila(s) desalineada(s)")
-        if calidad["duplicados"]:
-            detalles.append(f"{calidad['duplicados']} caso(s) duplicado(s)")
-        if calidad["sin_fecha"]:
-            detalles.append(f"{calidad['sin_fecha']} sin fecha legible")
-        st.info("🔎 Excluidos del cálculo: " + " · ".join(detalles) + ".")
-
     # --- KPIs -------------------------------------------------------------
-    ans = casos["DIAS_VENCIDO"].dropna()
-    edad = casos["DIAS_ABIERTO"].dropna()
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Casos vencidos", len(casos))
-    k2.metric(
-        "ANS mediana",
-        f"{ans.median():.0f} d" if len(ans) else "—",
-        help="Días transcurridos desde el vencimiento comprometido.",
-    )
-    k3.metric("Vencidos hace +90 d", int((ans > 90).sum()))
-    k4.metric(
-        "Antigüedad mediana",
-        f"{edad.median():.0f} d" if len(edad) else "—",
-        help="Días desde la creación del caso.",
-    )
+    meses = vista["por_mes"]
+    columnas = st.columns(2 + len(meses) + 1)
+    columnas[0].metric("Casos en curso", vista["total"])
+    for i, m in enumerate(meses):
+        columnas[1 + i].metric(m["etiqueta"], m["casos"])
+    columnas[-1].metric("Técnicos", meta["tecnicos"])
 
     st.divider()
 
-    # --- Barras por tramo -------------------------------------------------
-    b1, b2 = st.columns(2)
-    with b1:
-        _barras_tramo(
-            casos["TRAMO_ANS"].value_counts().to_dict(),
-            plan.ORDEN_ANS, "🔴 ANS — días vencido",
+    # --- Gráficos ---------------------------------------------------------
+    datos_mes = [{"etiqueta": m["etiqueta"], "casos": m["casos"]} for m in meses]
+    g1, g2 = st.columns(2)
+    with g1:
+        grafico = _grafico_barras(
+            datos_mes, "etiqueta", "casos",
+            "Casos por mes de creación", "Mes", "Casos", "#1F4E78",
         )
-    with b2:
-        _barras_tramo(
-            casos["TRAMO_EDAD"].value_counts().to_dict(),
-            plan.ORDEN_TRAMO, "⏱️ Envejecimiento — días abierto",
-        )
+        if grafico is not None:
+            st.altair_chart(grafico, width="stretch")
+    with g2:
+        grafico = _grafico_semanal(vista["por_semana"], "Evolución por semana")
+        if grafico is not None:
+            st.altair_chart(grafico, width="stretch")
 
+    # --- Ranking de técnicos ---------------------------------------------
+    top = vista["por_tecnico"][:10]
+    datos_tec = [
+        {"etiqueta": f"{t['usuario']}", "casos": t["casos"]} for t in reversed(top)
+    ]
     st.divider()
+    st.markdown("##### 👷 Casos por técnico")
+    grafico = _grafico_horizontal(datos_tec, "Top 10 — de mayor a menor", "#2E75B6")
+    if grafico is not None:
+        st.altair_chart(grafico, width="stretch")
 
-    # --- Tabla por tecnico ------------------------------------------------
-    st.markdown("##### 👷 Indicadores por técnico")
-    st.caption(
-        "Ordenado por gravedad (casos vencidos hace más de 90 días), no por "
-        "volumen: quien tiene más casos no es necesariamente quien tiene los "
-        "peores."
-    )
+    tabla_tec = pd.DataFrame(vista["por_tecnico"]).rename(columns={
+        "usuario": "Usuario", "region": "Zona", "casos": "Casos",
+    })
+    st.dataframe(tabla_tec, width="stretch", hide_index=True)
 
-    if tecnicos.empty:
-        st.info("No se pudieron calcular indicadores por técnico.")
+    # --- Más antiguos -----------------------------------------------------
+    st.divider()
+    st.markdown("##### 🕐 Los 10 casos más antiguos")
+    antiguos = vista["mas_antiguos"]
+    if antiguos.empty:
+        st.info("Ningún caso tiene fecha de creación legible.")
     else:
-        vista_tecnicos = tecnicos[[
-            "TECNICO", "REGION", "CASOS", "EDAD_PROM", "ANS_PROM",
-            "ANS_MAX", "ANS_SOBRE_90", "MAS_30D", "PCT_EVITABLE", "CONFIANZA",
-        ]].rename(columns={
-            "TECNICO": "Técnico", "REGION": "Regional", "CASOS": "Casos",
-            "EDAD_PROM": "Edad prom (d)", "ANS_PROM": "ANS prom (d)",
-            "ANS_MAX": "Peor ANS (d)", "ANS_SOBRE_90": ">90 d",
-            "MAS_30D": "Edad >30 d", "PCT_EVITABLE": "% evitable",
-            "CONFIANZA": "Cruce",
+        tabla_antiguos = pd.DataFrame({
+            "Caso": antiguos[plan.COL_ID_DIARIO].values,
+            "Técnico": antiguos["USUARIO"].values,
+            "Días abierto": antiguos[plan.COL_DIAS_ABIERTO].round(0).astype("Int64").values,
+            "Creado": antiguos["APERTURA"].dt.strftime("%d/%m/%Y").values,
+            "Estado": antiguos[plan.COL_ESTADO_ETIQUETA].values,
         })
-        st.dataframe(
-            vista_tecnicos.style.apply(
-                lambda s: [
-                    "background-color: #FEE2E2" if v == "REVISAR" else ""
-                    for v in s
-                ],
-                subset=["Cruce"],
+        st.dataframe(tabla_antiguos, width="stretch", hide_index=True)
+
+    # --- Descargas y resumen para correo ----------------------------------
+    st.divider()
+    resumen = plan.resumen_para_correo(vista)
+    d1, d2 = st.columns([1, 1])
+    with d1:
+        st.download_button(
+            "⬇️ Descargar casos (CSV)",
+            data=vista["casos"][[
+                plan.COL_ID_DIARIO, "USUARIO", "REGION", "APERTURA",
+                plan.COL_DIAS_ABIERTO, plan.COL_ESTADO_ETIQUETA,
+            ]].to_csv(index=False, na_rep="").encode("utf-8-sig"),
+            file_name=f"casos_en_curso_{meta['corte']:%Y%m%d}.csv",
+            mime="text/csv",
+            key="descarga_plan_casos",
+        )
+    with d2:
+        st.download_button(
+            "⬇️ Descargar distribución por día (CSV)",
+            data=(
+                vista["pivote"].to_csv(na_rep="").encode("utf-8-sig")
+                if not vista["pivote"].empty else b""
             ),
-            width="stretch",
-            hide_index=True,
-        )
-        st.download_button(
-            "⬇️ Descargar indicadores por técnico (CSV)",
-            data=vista_tecnicos.to_csv(index=False, na_rep="").encode("utf-8-sig"),
-            file_name=f"plan_tecnicos_{momento:%Y%m%d_%H%M}.csv",
+            file_name=f"distribucion_diaria_{meta['corte']:%Y%m%d}.csv",
             mime="text/csv",
-            key="descarga_plan_tecnicos",
+            key="descarga_plan_pivote",
+            disabled=vista["pivote"].empty,
         )
 
-    if calidad["tecnicos_a_revisar"]:
-        st.error(
-            "⚠️ **Hay técnicos cuyo nombre no se pudo emparejar con confianza.** "
-            "Revise el archivo oficial: estos casos podrían estar atribuidos a la "
-            "persona equivocada."
-        )
-        st.dataframe(
-            pd.DataFrame(calidad["tecnicos_a_revisar"])[
-                ["ORIGINAL", "METODO", "CANDIDATOS"]
-            ].rename(columns={
-                "ORIGINAL": "Nombre en el plan", "METODO": "Motivo",
-                "CANDIDATOS": "Candidatos",
-            }),
-            width="stretch", hide_index=True,
-        )
-    else:
-        st.success("✅ Los 15 nombres del plan se emparejaron con confianza alta.")
-
-    st.divider()
-
-    # --- Velocidad de cierre ----------------------------------------------
-    st.markdown("##### ⏱️ Velocidad de cierre")
-    if resultado["calidad"].get("cierre_disponible") and not resultado["cierre"].empty:
-        cierre = resultado["cierre"][[
-            "TECNICO", "REGION", "CASOS", "CERRADOS", "ABIERTOS",
-            "DIAS_CIERRE_MEDIANA", "DESVIACION_PROM", "PCT_CUMPLIO",
-        ]].rename(columns={
-            "TECNICO": "Técnico", "REGION": "Regional", "CASOS": "Casos",
-            "CERRADOS": "Cerrados", "ABIERTOS": "Abiertos",
-            "DIAS_CIERRE_MEDIANA": "Días cierre (mediana)",
-            "DESVIACION_PROM": "Desviación prom (d)",
-            "PCT_CUMPLIO": "% cumplió ANS",
-        })
-        st.dataframe(cierre, width="stretch", hide_index=True)
-        st.caption(
-            "**Desviación** positiva = se cerró después del vencimiento. "
-            "**% cumplió ANS** vacío = el técnico no tiene casos cerrados todavía."
-        )
-        st.download_button(
-            "⬇️ Descargar velocidad de cierre (CSV)",
-            data=cierre.to_csv(index=False, na_rep="").encode("utf-8-sig"),
-            file_name=f"plan_cierre_{momento:%Y%m%d_%H%M}.csv",
-            mime="text/csv",
-            key="descarga_plan_cierre",
-        )
-    else:
-        st.info(
-            "**Aún no se puede medir la velocidad de cierre.** La hoja `Casos_Ven` "
-            "no trae `ESTADO` ni `FECHA DE CIERRE`, así que no hay forma de saber "
-            "cuándo se cerró cada caso ni si se cumplió el ANS.\n\n"
-            "Ejecute una vez:\n\n"
-            "```\npython crear_plantilla_plan.py \"ruta\\al\\Plan de Trabajo.xlsx\"\n```\n\n"
-            "Eso genera una copia con las dos columnas (con lista desplegable en "
-            "`ESTADO`). Al llenarlas, esta sección se activa sola."
-        )
-
-    st.divider()
-
-    # --- Detalle por caso -------------------------------------------------
-    st.markdown("##### 📋 Detalle por caso")
-    # La ubicacion vive en la hoja del plan, no en la plantilla SLA.
-    col_ubicacion = "UBICACION" if "UBICACION" in casos.columns else None
-    columnas = ["CASO", "TECNICO_CANONICO", "REGION"]
-    if col_ubicacion:
-        columnas.append(col_ubicacion)
-    presentes = [c for c in columnas if c in casos.columns]
-    detalle = casos[presentes + [
-        "FECHA_CREACION", "VENCIMIENTO", "DIAS_ABIERTO", "DIAS_VENCIDO",
-        "TRAMO_EDAD", "TRAMO_ANS", "CULPA", "ESTADO_ULTIMO", "FECHA_CORREGIDA",
-    ]].rename(columns={
-        "CASO": "Caso", "TECNICO_CANONICO": "Técnico", "REGION": "Regional",
-        "UBICACION": "Ubicación",
-        "FECHA_CREACION": "Creado", "VENCIMIENTO": "Vencimiento",
-        "DIAS_ABIERTO": "Días abierto", "DIAS_VENCIDO": "Días vencido",
-        "TRAMO_EDAD": "Tramo edad", "TRAMO_ANS": "Tramo ANS",
-        "CULPA": "Culpa", "ESTADO_ULTIMO": "Último estado",
-        "FECHA_CORREGIDA": "Fecha corregida",
-    }).sort_values("Días vencido", ascending=False)
-
-    estilizado = detalle.style
-    if "Tramo ANS" in detalle.columns:
-        estilizado = estilizado.apply(
-            lambda s: [f"background-color: {c}" if c else ""
-                       for c in _colores_tramo(s)],
-            subset=["Tramo ANS"],
-        )
-    st.dataframe(estilizado, width="stretch", hide_index=True)
-    st.download_button(
-        "⬇️ Descargar detalle por caso (CSV)",
-        data=detalle.to_csv(index=False, na_rep="").encode("utf-8-sig"),
-        file_name=f"plan_casos_{momento:%Y%m%d_%H%M}.csv",
-        mime="text/csv",
-        key="descarga_plan_casos",
+    st.markdown("##### 📋 Resumen para el correo")
+    st.caption(
+        "Seleccione el texto, cópielo y péguelo en el correo. Se arma solo con "
+        "los datos del archivo."
+    )
+    st.text_area(
+        "Resumen",
+        value=resumen,
+        height=150,
+        key="resumen_correo_plan",
+        label_visibility="collapsed",
     )
 
-    with st.expander("🔎 Cómo se calcularon estos indicadores"):
-        st.markdown(
-            f"""
-            - **Fuente:** hoja `Casos_Ven` ({meta['casos_leidos']} filas) más las
-              hojas diarias, que aportan el `Vencimiento` (ANS) y el último
-              `Estado` de cada caso.
-            - **Fechas corregidas:** {meta['fechas_corregidas']}. Excel guardó
-              las fechas colombianas `DD/MM/AAAA` con formato `m/d/yy`, así que
-              mes y día quedaron intercambiados. Cada fecha se contrasta contra
-              un modelo de la secuencia de IDs de caso (que crece ~100 por día)
-              y solo se invierte si así queda más cerca. No se adivina: si no hay
-              referencia, se conserva el valor original.
-            - **Tramos de antigüedad:** 🟢 ≤7 d · 🟡 8-15 d · 🟠 16-30 d · 🔴 >30 d.
-            - **Tramos de ANS:** 🟡 1-7 d · 🟠 8-30 d · 🔴 31-90 d · ⛔ >90 d.
-            - **Cruce de técnicos:** por dos tokens (nombre + apellido). En el
-              catálogo hay 4 personas llamadas CARLOS, así que emparejar solo por
-              nombre de pila atribuiría casos a la persona equivocada. Los cruces
-              dudosos se marcan en rojo y **no** se adivinan.
-            - **% evitable:** proporción de casos cuya culpa es `TECNICO` o
-              `LOGISTICO`, es decir, gestionable por la operación.
-            - **Velocidad de cierre:** necesita `ESTADO` y `FECHA DE CIERRE` en
-              `Casos_Ven` (las agrega `crear_plantilla_plan.py`). Sin ellas no se
-              mide: no se deduce el cierre de la desaparición de un caso en las
-              hojas diarias, porque un caso abierto y uno cerrado desaparecen
-              igual y no son distinguibles.
-            """
+    # --- Paneles desplegables ---------------------------------------------
+    with st.expander("📊 Distribución por día (técnico × día)"):
+        if vista["pivote"].empty:
+            st.info("No hay fechas legibles para armar la distribución.")
+        else:
+            pivote = vista["pivote"].copy()
+            pivote.columns = [
+                c.strftime("%d-%b") if hasattr(c, "strftime") else str(c)
+                for c in pivote.columns
+            ]
+            st.dataframe(pivote, width="stretch")
+            st.caption(
+                f"{len(pivote)} técnicos × {len(pivote.columns) - 1} días. "
+                "La última columna es el total por técnico."
+            )
+
+    with st.expander("🔎 ¿De dónde sale el total?"):
+        c = vista["conciliacion"]
+        st.markdown(f"**Hoja usada:** `{c['hoja_corte']}` — {c['leidos_hoja']} casos")
+        if c["excluidos"]:
+            st.markdown("**No cuentan como en curso:**")
+            for e in c["excluidos"]:
+                st.markdown(f"- {e['estado']}: {e['casos']}")
+        st.markdown(f"**Total en curso: {c['en_curso']}**")
+        if c["sin_fecha"]:
+            st.caption(f"{c['sin_fecha']} caso(s) sin fecha de creación legible.")
+        if c["fechas_corregidas"]:
+            st.info(
+                f"Se corrigieron **{c['fechas_corregidas']} fechas** de este corte: "
+                "Excel guardó las fechas colombianas `DD/MM` con formato `m/d/yy`, "
+                "así que mes y día quedaban intercambiados. Sin corregirlas, el "
+                "reparto por mes saldría mal.",
+                icon="⚠️",
+            )
+        st.caption(
+            f"En todo el archivo se corrigieron {meta['corregidas_totales']} fechas "
+            f"de apertura sobre {meta['hojas']} hojas diarias."
         )
 
 

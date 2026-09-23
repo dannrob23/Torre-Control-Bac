@@ -37,8 +37,10 @@ y deja constancia de cuantas fechas toco y por que.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
+import threading
 import unicodedata
 
 import numpy as np
@@ -80,11 +82,14 @@ COL_FECHA_CIERRE = "FECHA DE CIERRE"
 COL_ID_DIARIO = "ID de incidente"
 COL_VENCIMIENTO = "Vencimiento"
 COL_APERTURA = "Fecha/hora de apertura"
-# La hoja diaria llama 'Estado' a su columna; la hoja de vencidos usa 'ESTADO'
-# (la agrega crear_plantilla_plan.py). Son columnas distintas y por eso llevan
-# constantes distintas.
+# La hoja diaria llama 'Estado' a su columna; la hoja de vencidos usa 'ESTADO'.
+# Son columnas distintas y por eso llevan constantes distintas.
 COL_ESTADO_DIARIO = "Estado"
 COL_ASIGNATARIO = "Asignatario"
+COL_UBICACION_DIARIA = "Ubicación"
+# El campo ATIENDE distingue Bogota de regional: es la unica senal de zona
+# que trae la hoja diaria (el nombre de usuario no dice de donde es).
+COL_ATIENDE = "ATIENDE"
 
 # ---------------------------------------------------------------------------
 # Semáforo de antigüedad (dias desde la creacion del caso)
@@ -443,6 +448,8 @@ def leer_cosecha_diaria(archivo: str | bytes, anio: int = ANIO_DEFECTO) -> pd.Da
         col_ap = _buscar_columna(df, [COL_APERTURA, "Fecha/hora de apertura"])
         col_est = _buscar_columna(df, [COL_ESTADO_DIARIO])
         col_asig = _buscar_columna(df, [COL_ASIGNATARIO])
+        col_ubi = _buscar_columna(df, [COL_UBICACION_DIARIA])
+        col_ate = _buscar_columna(df, [COL_ATIENDE])
 
         partes.append(pd.DataFrame({
             COL_ID_DIARIO: df[COL_ID_DIARIO].values,
@@ -452,6 +459,8 @@ def leer_cosecha_diaria(archivo: str | bytes, anio: int = ANIO_DEFECTO) -> pd.Da
             COL_VENCIMIENTO: df[col_vto].values if col_vto else pd.NaT,
             COL_ESTADO_DIARIO: df[col_est].values if col_est else "",
             COL_ASIGNATARIO: df[col_asig].values if col_asig else "",
+            COL_UBICACION_DIARIA: df[col_ubi].values if col_ubi else "",
+            COL_ATIENDE: df[col_ate].values if col_ate else "",
         }))
 
     if not partes:
@@ -621,503 +630,407 @@ def corregir_fechas(
     )
 
 
-# ---------------------------------------------------------------------------
-# Deduccion de tecnicos
-# ---------------------------------------------------------------------------
-
-def _tokens(nombre: str) -> list[str]:
-    return [t for t in normalizar(nombre).split() if t]
 
 
-def deducir_tecnicos(
-    nombres: list[str],
-    catalogo: dict[str, str] | None = None,
-    alias: dict[str, str] | None = None,
-) -> pd.DataFrame:
+# ===========================================================================
+# VISTA GERENCIAL — casos en curso
+# ===========================================================================
+#
+# Esta seccion reemplaza los indicadores de operacion (ANS por tramos,
+# envejecimiento, culpa, velocidad de cierre). El objetivo es otro: un tablero
+# que gerencia entienda en diez segundos y que sirva para enviar por correo.
+#
+# Fuente: las hojas diarias del Plan de Trabajo ("23_Septiembre", ...). Cada
+# hoja es la foto de los casos EN CURSO ese dia. NO se usa la hoja Casos_Ven,
+# que es el historico de vencidos (abiertos y cerrados) y responde otra
+# pregunta.
+#
+# La fecha relevante es la de APERTURA (creacion del caso), que es la que
+# alimenta el corte por mes y por semana. Esa columna arrastra el mismo
+# problema de fechas mes/dia que el resto del archivo, asi que se corrige con
+# el modelo de IDs antes de contar nada.
+
+# Estados que se consideran "en curso" para el tablero gerencial.
+# La hoja diaria trae ademas Suspendido, Ready y Work In Progress, que NO son
+# trabajo activo; excluirlos es lo que hace cuadrar el total con el seguimiento
+# que ya se envia por correo.
+ESTADOS_EN_CURSO = (
+    "EN CURSO",
+    "TRABAJO EN CURSO",
+)
+
+# Etiquetas cortas para la interfaz (la hoja mezcla mayusculas y variantes).
+ETIQUETA_ESTADO = {
+    "EN CURSO": "En curso",
+    "TRABAJO EN CURSO": "Trabajo en curso",
+    "SUSPENDIDO": "Suspendido",
+    "READY": "Ready",
+    "WORK IN PROGRESS": "Work in progress",
+    "PREPARADO": "Preparado",
+    "ASIGNADO": "Asignado",
+    "PENDIENTE": "Pendiente",
+    "PENDING": "Pending",
+    "CATEGORIZADO": "Categorizado",
+}
+
+# Columnas del resultado gerencial.
+COL_DIAS_ABIERTO = "DIAS_ABIERTO"
+COL_ESTADO_ETIQUETA = "ESTADO_ETIQUETA"
+
+
+def _etiqueta_estado(valor) -> str:
+    """Nombre presentable del estado, con respaldo al valor original."""
+    clave = normalizar(valor)
+    return ETIQUETA_ESTADO.get(clave, str(valor).strip() or "Sin estado")
+
+
+def meses_del_plan(cosecha: pd.DataFrame, columna: str = "APERTURA") -> list[pd.Period]:
+    """Meses presentes en los datos, en orden. Evita fijar agosto/septiembre."""
+    if cosecha.empty or columna not in cosecha.columns:
+        return []
+    periodos = cosecha[columna].dropna().dt.to_period("M").unique()
+    return sorted(periodos)
+
+
+# Cache de la lectura del Plan de Trabajo (ver _cosecha_cacheada).
+_CACHE_COSECHA: dict[str, tuple[pd.DataFrame, dict]] = {}
+_CACHE_MAX = 2
+_CACHE_LOCK = threading.Lock()
+
+
+def _cosecha_cacheada(datos: bytes) -> tuple[pd.DataFrame, dict]:
     """
-    Empareja los nombres cortos del plan (``CARLOS BRAVO``) con los nombres
-    completos del catalogo oficial (``CARLOS ANDRES BRAVO MARTINEZ``).
+    Devuelve ``(cosecha, modelos)`` reutilizando el trabajo ya hecho.
 
-    El emparejamiento usa DOS tokens (nombre + apellido) y nunca solo el nombre
-    de pila: en el catalogo hay 4 personas llamadas CARLOS, 3 CRISTIAN y 2 JORGE,
-    asi que emparejar por nombre de pila atribuiria casos a la persona equivocada.
+    Lee las hojas diarias y calibra el modelo de IDs una sola vez por contenido
+    de archivo. Sin esto, cada cambio de corte en el tablero obligaba a leer de
+    nuevo el xlsx completo (20 hojas) y recalibrar el modelo.
 
-    Devuelve un DataFrame con una fila por nombre de entrada y las columnas:
-    ``ORIGINAL``, ``NORMALIZADO``, ``CANONICO``, ``REGION``, ``METODO``,
-    ``CONFIANZA`` y ``CANDIDATOS``. Las filas con ``CONFIANZA`` distinta de
-    ``ALTA`` deben revisarse a mano: el modulo no adivina.
+    La clave es el sha1 del contenido, no la ruta: asi se reutiliza aunque el
+    archivo se suba de nuevo con otro nombre.
     """
-    if catalogo is None:
-        from core import TECNICOS_REGION
-        catalogo = TECNICOS_REGION
-    if alias is None:
-        try:
-            from core import ALIAS_TECNICOS
-            alias = ALIAS_TECNICOS
-        except ImportError:
-            alias = {}
+    clave = hashlib.sha1(datos).hexdigest()
+    with _CACHE_LOCK:
+        guardado = _CACHE_COSECHA.get(clave)
+    if guardado is not None:
+        return guardado
 
-    alias_norm = {normalizar(k): v for k, v in (alias or {}).items()}
-    catalogo_norm = {}
-    for canonico in catalogo:
-        catalogo_norm[normalizar(canonico)] = canonico
+    info = reconocer_tipo(datos)
+    hojas = hojas_diarias(info["hojas"])
+    if not hojas:
+        raise ErrorPlan(
+            "El archivo no tiene hojas diarias (se esperaban nombres como "
+            "'22_Septiembre'). Hojas encontradas: "
+            + ", ".join(map(str, info["hojas"][:8]))
+        )
 
-    filas = []
-    for original in nombres:
-        norm = normalizar(original)
-        if not norm:
-            filas.append({
-                "ORIGINAL": original, "NORMALIZADO": norm, "CANONICO": "",
-                "REGION": "SIN REGION", "METODO": "vacio",
-                "CONFIANZA": "REVISAR", "CANDIDATOS": "",
-            })
-            continue
+    # El anio no viene en el nombre de la hoja ("22_Septiembre"): se prueba con
+    # el valor por defecto y, si las fechas del diario dicen otro, se rehace.
+    cosecha = leer_cosecha_diaria(datos, ANIO_DEFECTO)
+    anio = _inferir_anio_de_diario(cosecha)
+    if anio != ANIO_DEFECTO:
+        cosecha = leer_cosecha_diaria(datos, anio)
 
-        # 1) Coincidencia exacta con el catalogo.
-        if norm in catalogo_norm:
-            canonico = catalogo_norm[norm]
-            filas.append({
-                "ORIGINAL": original, "NORMALIZADO": norm, "CANONICO": canonico,
-                "REGION": catalogo.get(canonico, "SIN REGION"), "METODO": "exacto",
-                "CONFIANZA": "ALTA", "CANDIDATOS": "",
-            })
-            continue
+    # Fecha de apertura corregida con el modelo de IDs (mes/dia invertidos).
+    modelos = modelo_ids_a_fecha(cosecha)
+    cosecha["APERTURA"] = corregir_fechas(
+        cosecha.assign(**{COL_CASO: cosecha[COL_ID_DIARIO]}),
+        COL_APERTURA,
+        modelos,
+        columna_id=COL_CASO,
+    )
+    cosecha["APERTURA_NATIVA"] = pd.to_datetime(
+        cosecha[COL_APERTURA], errors="coerce"
+    )
+    cosecha["APERTURA_CORREGIDA"] = cosecha["APERTURA"] != cosecha["APERTURA_NATIVA"]
 
-        # 2) Alias declarado.
-        if norm in alias_norm:
-            canonico = alias_norm[norm]
-            filas.append({
-                "ORIGINAL": original, "NORMALIZADO": norm, "CANONICO": canonico,
-                "REGION": catalogo.get(canonico, "SIN REGION"), "METODO": "alias",
-                "CONFIANZA": "ALTA", "CANDIDATOS": "",
-            })
-            continue
-
-        # 3) Contencion de tokens: todos los tokens del nombre corto aparecen
-        #    en el nombre completo.
-        tokens = _tokens(norm)
-        coincidencias = []
-        for canonico_norm, canonico in catalogo_norm.items():
-            tokens_can = set(_tokens(canonico_norm))
-            if tokens and all(t in tokens_can for t in tokens):
-                coincidencias.append(canonico)
-
-        if len(coincidencias) == 1:
-            canonico = coincidencias[0]
-            metodo = "tokens" if len(tokens) > 1 else "nombre-pila-unico"
-            filas.append({
-                "ORIGINAL": original, "NORMALIZADO": norm, "CANONICO": canonico,
-                "REGION": catalogo.get(canonico, "SIN REGION"), "METODO": metodo,
-                "CONFIANZA": "ALTA", "CANDIDATOS": "",
-            })
-            continue
-
-        # 4) Ambiguo o sin coincidencia: se reporta, no se adivina.
-        filas.append({
-            "ORIGINAL": original, "NORMALIZADO": norm,
-            "CANONICO": "" if len(coincidencias) != 1 else coincidencias[0],
-            "REGION": "SIN REGION", "METODO": "ambiguo" if coincidencias else "sin-coincidencia",
-            "CONFIANZA": "REVISAR",
-            "CANDIDATOS": " | ".join(sorted(coincidencias)),
-        })
-
-    return pd.DataFrame(filas)
+    resultado = (cosecha, modelos)
+    with _CACHE_LOCK:
+        # Se limita el tamano para no crecer sin control si se suben muchos
+        # archivos distintos en una misma sesion.
+        if len(_CACHE_COSECHA) >= _CACHE_MAX:
+            _CACHE_COSECHA.clear()
+        _CACHE_COSECHA[clave] = resultado
+    return resultado
 
 
-# ---------------------------------------------------------------------------
-# Indicadores
-# ---------------------------------------------------------------------------
-
-def _tramo_edad(dias) -> str:
-    if pd.isna(dias):
-        return "SIN FECHA"
-    if dias <= EDAD_VERDE:
-        return TRAMO_VERDE
-    if dias <= EDAD_AMARILLO:
-        return TRAMO_AMARILLO
-    if dias <= EDAD_NARANJA:
-        return TRAMO_NARANJA
-    return TRAMO_ROJO
-
-
-def _tramo_ans(dias) -> str:
-    if pd.isna(dias):
-        return "SIN VENCIMIENTO"
-    if dias < 0:
-        return ANS_EN_PLAZO
-    if dias <= 7:
-        return ANS_1_7
-    if dias <= 30:
-        return ANS_8_30
-    if dias <= 90:
-        return ANS_31_90
-    return ANS_MAS_90
-
-
-def analizar(
+def vista_gerencial(
     archivo: str | bytes,
     *,
-    momento: pd.Timestamp | None = None,
-    hoja_vencidos: str = HOJA_VENCIDOS,
+    corte: pd.Timestamp | str | None = None,
+    estados: tuple[str, ...] = ESTADOS_EN_CURSO,
+    desde: pd.Timestamp | str | None = None,
+    hasta: pd.Timestamp | str | None = None,
 ) -> dict:
     """
-    Ejecuta el analisis completo del Plan de Trabajo.
+    Arma los datos del tablero gerencial de casos en curso.
+
+    Parametros
+    ----------
+    corte : fecha de corte. Si es ``None`` se usa la ultima hoja disponible.
+    estados : estados que cuentan como "en curso". El valor por defecto
+        (``ESTADOS_EN_CURSO``) es el que excluye Suspendido, Ready y
+        Work In Progress.
+    desde, hasta : rango del eje temporal. Si son ``None`` se usa desde la
+        apertura mas antigua hasta el corte.
 
     Devuelve un diccionario con:
 
-      ``casos``      DataFrame por caso, con fechas corregidas, edad, ANS,
-                     tramos, region y estado de deduccion del tecnico.
-      ``tecnicos``   DataFrame de indicadores por tecnico.
-      ``calidad``    dict con los hallazgos de calidad de datos.
-      ``meta``       dict con el modelo de fechas y las cifras de correccion.
-      ``cosecha``    DataFrame de la cosecha diaria (para diagnostico).
+      ``casos``      una fila por caso en curso, con la fecha de apertura ya
+                     corregida, los dias abiertos y la etiqueta de estado.
+      ``total``      numero de casos en curso en el corte.
+      ``por_mes``    lista de ``{"mes", "etiqueta", "casos"}``.
+      ``por_semana`` lista de ``{"semana", "etiqueta", "desde", "casos"}``.
+      ``por_dia``    lista de ``{"fecha", "etiqueta", "casos"}``.
+      ``por_tecnico``lista de ``{"usuario", "region", "casos"}``, de mayor a menor.
+      ``mas_antiguos``los 10 casos con mas dias abiertos.
+      ``por_estado`` lista de ``{"estado", "casos"}``.
+      ``por_region`` lista de ``{"region", "casos"}``.
+      ``pivote``     tabla usuario x dia, como la del correo.
+      ``totales_dia``fila de totales por dia.
+      ``conciliacion`` dict con el desglose de por que el total es ese.
+      ``meta``       corte, rango, estados y cifras de la lectura.
     """
-    if momento is None:
-        try:
-            from core import ahora_colombia
-            momento = pd.Timestamp(ahora_colombia())
-        except ImportError:
-            momento = pd.Timestamp.now()
+    # Se lee una sola vez: evita abrir el xlsx varias veces.
+    if isinstance(archivo, (bytes, bytearray)):
+        datos = bytes(archivo)
+    else:
+        with open(archivo, "rb") as fh:
+            datos = fh.read()
 
-    # El tipo de archivo se reconoce solo: si lo que llega no es un Plan de
-    # Trabajo, se dice con claridad en vez de fallar buscando una hoja.
-    info = reconocer_tipo(archivo)
-    if info["tipo"] == TIPO_PLANTILLA:
-        raise ErrorPlan(
-            "Este archivo es la PLANTILLA de seguimiento SLA, no un Plan de "
-            f"Trabajo ({info['detalle']}). Subalo en 'Cargar plantilla', no en "
-            "'Cargar Plan de Trabajo'."
-        )
-    if info["tipo"] == TIPO_DESCONOCIDO:
-        raise ErrorPlan("El archivo no parece un Plan de Trabajo. " + info["detalle"])
+    # Lectura + modelo de fechas, reutilizados entre llamadas (ver la funcion).
+    cosecha, modelos = _cosecha_cacheada(datos)
 
-    hoja = hoja_vencidos or info["hoja_principal"] or HOJA_VENCIDOS
-    crudo = leer_vencidos(archivo, hoja=hoja)
-    # El anio del plan se deduce del propio archivo: los nombres de hoja no lo
-    # traen ("17_Septiembre") y no se quiere una constante que caduque.
-    anio = inferir_anio(crudo)
-    cosecha = leer_cosecha_diaria(archivo, anio)
-    modelos = modelo_ids_a_fecha(cosecha)
-
-    # --- fechas de creacion corregidas -----------------------------------
-    crudo["FECHA_CREACION_ORIGINAL"] = pd.to_datetime(
-        crudo[COL_FECHA_CREACION], errors="coerce", format="mixed", dayfirst=False
-    )
-    crudo["FECHA_CREACION"] = corregir_fechas(
-        crudo, COL_FECHA_CREACION, modelos, columna_id=COL_CASO
-    )
-    crudo["FECHA_CORREGIDA"] = (
-        crudo["FECHA_CREACION"].notna()
-        & crudo["FECHA_CREACION_ORIGINAL"].notna()
-        & (crudo["FECHA_CREACION"] != crudo["FECHA_CREACION_ORIGINAL"])
+    # Las hojas disponibles salen de la propia cosecha ya leida.
+    hojas = (
+        cosecha.groupby("HOJA")["FECHA_HOJA"].first().to_dict()
+        if not cosecha.empty else {}
     )
 
-    # --- vencimiento (ANS) desde la cosecha -------------------------------
-    diario = cosecha.copy()
-    diario["VENCIMIENTO_NATIVO"] = pd.to_datetime(
-        diario[COL_VENCIMIENTO].astype(str).str.strip(),
-        errors="coerce", format="mixed", dayfirst=False,
-    )
-    diario["VENCIMIENTO_CORREGIDO"] = corregir_fechas(
-        diario.assign(**{COL_CASO: diario[COL_ID_DIARIO]}),
-        "VENCIMIENTO_NATIVO", modelos, columna_id=COL_CASO,
-    )
-    vencimiento_por_caso = (
-        diario.dropna(subset=["VENCIMIENTO_CORREGIDO"])
-        .groupby(COL_ID_DIARIO)["VENCIMIENTO_CORREGIDO"].min()
-    )
-    crudo["VENCIMIENTO"] = crudo[COL_CASO].map(vencimiento_por_caso)
+    # --- corte ------------------------------------------------------------
+    hojas_ordenadas = sorted(hojas.items(), key=lambda kv: kv[1])
+    ultima_hoja, fecha_ultima = hojas_ordenadas[-1]
+    if corte is None:
+        corte_ts = fecha_ultima + pd.Timedelta(hours=23, minutes=59)
+    else:
+        corte_ts = pd.Timestamp(corte)
+        if corte_ts.hour == 0 and corte_ts.minute == 0:
+            corte_ts = corte_ts + pd.Timedelta(hours=23, minutes=59)
+    hoja_corte = hojas_ordenadas[-1][0]
+    for nombre, fecha in hojas_ordenadas:
+        if fecha <= corte_ts:
+            hoja_corte = nombre
 
-    estado_por_caso = (
-        diario.sort_values("FECHA_HOJA").groupby(COL_ID_DIARIO)[COL_ESTADO_DIARIO].last()
-    )
-    crudo["ESTADO_ULTIMO"] = crudo[COL_CASO].map(estado_por_caso).map(
+    # --- casos en curso en la hoja del corte ------------------------------
+    del_corte = cosecha[cosecha["HOJA"] == hoja_corte].copy()
+    del_corte[COL_ESTADO_DIARIO] = del_corte[COL_ESTADO_DIARIO].map(
         lambda v: normalizar(v) if pd.notna(v) else ""
     )
 
-    # --- metricas por caso ------------------------------------------------
-    casos = crudo[~crudo["FILA_DESALINEADA"]].copy()
-    casos["DIAS_ABIERTO"] = (momento - casos["FECHA_CREACION"]).dt.total_seconds() / 86400
-    casos["DIAS_VENCIDO"] = (momento - casos["VENCIMIENTO"]).dt.total_seconds() / 86400
-    casos["TRAMO_EDAD"] = casos["DIAS_ABIERTO"].map(_tramo_edad)
-    casos["TRAMO_ANS"] = casos["DIAS_VENCIDO"].map(_tramo_ans)
+    estados_norm = tuple(normalizar(e) for e in estados)
+    en_curso = del_corte[del_corte[COL_ESTADO_DIARIO].isin(estados_norm)].copy()
 
-    # Velocidad de cierre: solo si el archivo trae ESTADO y FECHA DE CIERRE.
-    casos = calcular_cierre(casos)
-
-    # --- tecnicos ---------------------------------------------------------
-    nombres = sorted({n for n in casos[COL_TECNICO].dropna().unique() if str(n).strip()})
-    mapa = deducir_tecnicos(nombres)
-
-    # Varias grafias del mismo nombre ("caRLOS JIMENEZ" y "CARLOS JIMENEZ")
-    # colapsan al mismo texto normalizado. Se consolida para poder indexar, y se
-    # conserva la confianza mas baja: si una variante es dudosa, el tecnico
-    # completo queda marcado para revision.
-    consenso = (
-        mapa.groupby("NORMALIZADO")
-        .agg({
-            "CANONICO": "first",
-            "REGION": "first",
-            "CONFIANZA": lambda s: "REVISAR" if "REVISAR" in set(s) else "ALTA",
-            "METODO": lambda s: " + ".join(sorted(set(s))),
-            "ORIGINAL": lambda s: " | ".join(sorted(set(s))),
-        })
+    en_curso[COL_ESTADO_ETIQUETA] = en_curso[COL_ESTADO_DIARIO].map(_etiqueta_estado)
+    en_curso[COL_DIAS_ABIERTO] = (
+        corte_ts - en_curso["APERTURA"]
+    ).dt.total_seconds() / 86400
+    en_curso[COL_ASIGNATARIO] = (
+        en_curso[COL_ASIGNATARIO].astype(str).str.strip().replace({"nan": ""})
     )
+    en_curso["USUARIO"] = en_curso[COL_ASIGNATARIO].replace({"": "SIN ASIGNAR"})
 
-    casos["TECNICO_NORM"] = casos[COL_TECNICO].map(normalizar)
-    casos["TECNICO_CANONICO"] = casos["TECNICO_NORM"].map(consenso["CANONICO"]).fillna("")
-    casos["REGION"] = casos["TECNICO_NORM"].map(consenso["REGION"]).fillna("SIN REGION")
-    casos["TECNICO_CONFIANZA"] = casos["TECNICO_NORM"].map(consenso["CONFIANZA"]).fillna("REVISAR")
+    # Zona: el campo ATIENDE de la hoja diaria distingue Bogota de regional.
+    if COL_ATIENDE in en_curso.columns:
+        atiende = en_curso[COL_ATIENDE].astype(str).str.strip()
+        en_curso["REGION"] = atiende.map(
+            lambda v: "Bogotá" if normalizar(v) == "BOGOTA" else
+            ("Regional" if normalizar(v) else "Sin dato")
+        )
+    else:
+        en_curso["REGION"] = "Sin dato"
 
-    tecnicos = _indicadores_por_tecnico(casos)
-    cierre = _indicadores_cierre(casos)
-    calidad = _calidad(crudo, casos, cosecha, mapa)
+    # --- rango del eje ----------------------------------------------------
+    ap_validas = en_curso["APERTURA"].dropna()
+    if desde is None:
+        desde_ts = ap_validas.min() if len(ap_validas) else corte_ts
+    else:
+        desde_ts = pd.Timestamp(desde)
+    if hasta is None:
+        hasta_ts = corte_ts
+    else:
+        hasta_ts = pd.Timestamp(hasta)
+
+    # --- agregaciones -----------------------------------------------------
+    por_mes = []
+    if len(ap_validas):
+        for periodo, grupo in en_curso.groupby(en_curso["APERTURA"].dt.to_period("M")):
+            por_mes.append({
+                "mes": str(periodo),
+                "etiqueta": _ETIQUETA_MES.get(periodo.month, str(periodo.month)),
+                "casos": int(len(grupo)),
+            })
+
+    por_semana = []
+    if len(ap_validas):
+        iso = en_curso["APERTURA"].dt.isocalendar()
+        etiqueta_semana = (
+            iso["year"].astype(str) + "-W" + iso["week"].astype(str).str.zfill(2)
+        )
+        for clave, grupo in en_curso.groupby(etiqueta_semana):
+            fechas = grupo["APERTURA"].dropna()
+            por_semana.append({
+                "semana": clave,
+                "etiqueta": f"Semana {clave.split('-W')[1]}",
+                "desde": fechas.min(),
+                "casos": int(len(grupo)),
+            })
+        por_semana.sort(key=lambda d: d["desde"])
+
+    por_dia = []
+    for fecha, grupo in en_curso.dropna(subset=["APERTURA"]).groupby(
+        en_curso["APERTURA"].dt.normalize()
+    ):
+        por_dia.append({
+            "fecha": fecha,
+            "etiqueta": fecha.strftime("%d-%b"),
+            "casos": int(len(grupo)),
+        })
+    por_dia.sort(key=lambda d: d["fecha"])
+
+    por_tecnico = (
+        en_curso.groupby(["USUARIO", "REGION"])[COL_ID_DIARIO]
+        .count()
+        .reset_index(name="casos")
+        .sort_values("casos", ascending=False)
+    )
+    lista_tecnico = [
+        {"usuario": r["USUARIO"], "region": r["REGION"], "casos": int(r["casos"])}
+        for _, r in por_tecnico.iterrows()
+    ]
+
+    por_estado = [
+        {"estado": _etiqueta_estado(k), "casos": int(v)}
+        for k, v in del_corte[COL_ESTADO_DIARIO].value_counts().items()
+    ]
+
+    por_region = [
+        {"region": str(k), "casos": int(v)}
+        for k, v in en_curso["REGION"].value_counts().items()
+    ]
+
+    mas_antiguos = en_curso.sort_values(COL_DIAS_ABIERTO, ascending=False).head(10)
+
+    # --- pivote usuario x dia (como la tabla del correo) ------------------
+    pivote = pd.DataFrame()
+    totales_dia = pd.DataFrame()
+    if len(ap_validas):
+        base = en_curso.dropna(subset=["APERTURA"]).copy()
+        base["DIA"] = base["APERTURA"].dt.normalize()
+        pivote = pd.pivot_table(
+            base, index="USUARIO", columns="DIA", values=COL_ID_DIARIO,
+            aggfunc="count", fill_value=0,
+        )
+        pivote["Total general"] = pivote.sum(axis=1)
+        pivote = pivote.sort_values("Total general", ascending=False)
+        fila_total = pivote.sum(axis=0).to_frame().T
+        fila_total.index = ["Total general"]
+        totales_dia = fila_total
+
+    conciliacion = {
+        "hoja_corte": hoja_corte,
+        "leidos_hoja": int(len(del_corte)),
+        "excluidos": [
+            {"estado": _etiqueta_estado(k), "casos": int(v)}
+            for k, v in del_corte[COL_ESTADO_DIARIO].value_counts().items()
+            if k not in estados_norm
+        ],
+        "en_curso": int(len(en_curso)),
+        "sin_fecha": int(en_curso["APERTURA"].isna().sum()),
+        "fechas_corregidas": int(en_curso["APERTURA_CORREGIDA"].sum()),
+    }
 
     return {
-        "casos": casos,
-        "tecnicos": tecnicos,
-        "cierre": cierre,
-        "mapa_tecnicos": mapa,
-        "calidad": calidad,
-        "cosecha": cosecha,
+        "casos": en_curso,
+        "total": int(len(en_curso)),
+        "por_mes": por_mes,
+        "por_semana": por_semana,
+        "por_dia": por_dia,
+        "por_tecnico": lista_tecnico,
+        "mas_antiguos": mas_antiguos,
+        "por_estado": por_estado,
+        "por_region": por_region,
+        "pivote": pivote,
+        "totales_dia": totales_dia,
+        "conciliacion": conciliacion,
         "meta": {
-            "momento": momento,
-            "anio": anio,
-            "modelos": modelos,
-            "casos_leidos": int(len(crudo)),
-            "casos_analizados": int(len(casos)),
-            "fechas_corregidas": int(casos["FECHA_CORREGIDA"].sum()),
-            "filas_desalineadas": int(crudo["FILA_DESALINEADA"].sum()),
-            "duplicados": int(crudo["DUPLICADO"].sum()),
-            "con_vencimiento": int(casos["VENCIMIENTO"].notna().sum()),
+            "corte": corte_ts,
+            "hoja_corte": hoja_corte,
+            "desde": desde_ts,
+            "hasta": hasta_ts,
+            "estados": [normalizar(e) for e in estados],
+            "tecnicos": int(en_curso["USUARIO"].nunique()),
+            "corregidas_totales": int(cosecha["APERTURA_CORREGIDA"].sum()),
+            "hojas": len(hojas),
         },
     }
 
 
-def _indicadores_por_tecnico(casos: pd.DataFrame) -> pd.DataFrame:
-    """Resumen de cartera y envejecimiento por tecnico."""
-    if casos.empty:
-        return pd.DataFrame()
-
-    filas = []
-    for (norm, canonico, region), grupo in casos.groupby(
-        ["TECNICO_NORM", "TECNICO_CANONICO", "REGION"], dropna=False
-    ):
-        edad = grupo["DIAS_ABIERTO"].dropna()
-        ans = grupo["DIAS_VENCIDO"].dropna()
-        confianzas = set(grupo["TECNICO_CONFIANZA"].dropna())
-        filas.append({
-            "TECNICO": canonico or norm,
-            "NOMBRE_EN_PLAN": norm,
-            "REGION": region,
-            "CASOS": int(len(grupo)),
-            "EDAD_PROM": round(float(edad.mean()), 1) if len(edad) else np.nan,
-            "EDAD_MEDIANA": round(float(edad.median()), 1) if len(edad) else np.nan,
-            "EDAD_MAX": round(float(edad.max()), 1) if len(edad) else np.nan,
-            "MAS_30D": int((edad > EDAD_NARANJA).sum()),
-            "MAS_15D": int((edad > EDAD_AMARILLO).sum()),
-            "ANS_PROM": round(float(ans.mean()), 1) if len(ans) else np.nan,
-            "ANS_MAX": round(float(ans.max()), 1) if len(ans) else np.nan,
-            "ANS_SOBRE_90": int((ans > 90).sum()),
-            "PCT_EVITABLE": round(
-                float(grupo[COL_CULPA].isin(["TECNICO", "LOGISTICO"]).mean() * 100), 1
-            ) if COL_CULPA in grupo.columns else np.nan,
-            "CONFIANZA": "REVISAR" if "REVISAR" in confianzas else "ALTA",
-        })
-
-    tabla = pd.DataFrame(filas)
-    if tabla.empty:
-        return tabla
-    return tabla.sort_values(["ANS_SOBRE_90", "MAS_30D", "CASOS"], ascending=False).reset_index(drop=True)
-
-
-# ---------------------------------------------------------------------------
-# Velocidad de cierre (requiere ESTADO y FECHA DE CIERRE)
-# ---------------------------------------------------------------------------
-
-# Estados que cuentan como cierre efectivo.
-ESTADOS_CERRADOS = {"CERRADO A TIEMPOS", "CERRADO TARDE", "CANCELADO"}
-
-# Estados que indican que el caso sigue vivo.
-ESTADOS_ABIERTOS = {
-    "ABIERTO", "EN CURSO", "EN RUTA", "EN FIRMAS", "EN VALIDACION",
-    "SUSPENDIDO", "ASIGNADO", "CATEGORIZADO", "PENDIENTE", "PENDING",
-    "PREPARADO", "READY", "TRABAJO EN CURSO", "WORK IN PROGRESS",
+_ETIQUETA_MES = {
+    1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio",
+    7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre",
+    12: "Diciembre",
 }
 
 
-def calcular_cierre(casos: pd.DataFrame) -> pd.DataFrame:
+def _inferir_anio_de_diario(cosecha: pd.DataFrame) -> int:
     """
-    Añade las columnas de velocidad de cierre, si el archivo las trae.
+    Deduce el anio del plan a partir de las fechas del diario.
 
-    Requiere que ``Casos_Ven`` tenga ``ESTADO`` y ``FECHA DE CIERRE`` (las
-    agrega ``crear_plantilla_plan.py``). Si no existen o estan vacias, devuelve
-    el DataFrame sin tocar: el tablero lo informa y no inventa resultados.
-
-    Columnas que añade:
-      ``CERRADO``        bool, el caso esta cerrado
-      ``DIAS_CIERRE``    dias entre creacion y cierre
-      ``CUMPLIO_ANS``    bool, se cerro antes del vencimiento
-      ``DESVIACION``     dias de desviacion (positivo = cerro tarde)
+    Se aceptan dos senales, en este orden: un anio de 4 digitos en el texto de
+    la fecha, o el anio de una fecha nativa. Se toma el mas frecuente, que es
+    robusto frente a celdas sueltas mal formadas.
     """
-    if COL_ESTADO not in casos.columns:
-        return casos
-
-    casos = casos.copy()
-    estado = casos[COL_ESTADO].map(lambda v: normalizar(v) if pd.notna(v) else "")
-
-    tiene_cierre = COL_FECHA_CIERRE in casos.columns
-    fecha_cierre = (
-        pd.to_datetime(casos[COL_FECHA_CIERRE], errors="coerce", format="mixed", dayfirst=True)
-        if tiene_cierre else pd.Series(pd.NaT, index=casos.index)
-    )
-
-    casos["CERRADO"] = estado.isin(ESTADOS_CERRADOS) | fecha_cierre.notna()
-    casos["DIAS_CIERRE"] = (fecha_cierre - casos["FECHA_CREACION"]).dt.total_seconds() / 86400
-    casos["CUMPLIO_ANS"] = np.where(
-        fecha_cierre.notna() & casos["VENCIMIENTO"].notna(),
-        fecha_cierre <= casos["VENCIMIENTO"],
-        None,
-    )
-    casos["DESVIACION"] = (fecha_cierre - casos["VENCIMIENTO"]).dt.total_seconds() / 86400
-    return casos
+    if cosecha.empty:
+        return ANIO_DEFECTO
+    anios = []
+    for valor in cosecha[COL_APERTURA].dropna():
+        if isinstance(valor, pd.Timestamp):
+            anios.append(valor.year)
+            continue
+        for texto in PATRON_ANIO.findall(str(valor)):
+            anio = int(texto)
+            if 2000 <= anio <= 2100:
+                anios.append(anio)
+    if not anios:
+        return ANIO_DEFECTO
+    return int(pd.Series(anios).mode().iloc[0])
 
 
-def _indicadores_cierre(casos: pd.DataFrame) -> pd.DataFrame:
-    """Tiempo de cierre y cumplimiento del ANS por tecnico."""
-    if "DIAS_CIERRE" not in casos.columns or casos["DIAS_CIERRE"].notna().sum() == 0:
-        return pd.DataFrame()
+def resumen_para_correo(vista: dict) -> str:
+    """
+    Texto listo para pegar en el correo, con el formato que ya se usa.
 
-    filas = []
-    for (norm, canonico, region), grupo in casos.groupby(
-        ["TECNICO_NORM", "TECNICO_CANONICO", "REGION"], dropna=False
-    ):
-        cerrados = grupo[grupo["CERRADO"]]
-        dias = grupo["DIAS_CIERRE"].dropna()
-        cumplio = grupo["CUMPLIO_ANS"].dropna()
-        desv = grupo["DESVIACION"].dropna()
-        filas.append({
-            "TECNICO": canonico or norm,
-            "REGION": region,
-            "CASOS": int(len(grupo)),
-            "CERRADOS": int(len(cerrados)),
-            "ABIERTOS": int(len(grupo) - len(cerrados)),
-            "DIAS_CIERRE_PROM": round(float(dias.mean()), 1) if len(dias) else np.nan,
-            "DIAS_CIERRE_MEDIANA": round(float(dias.median()), 1) if len(dias) else np.nan,
-            "PCT_CUMPLIO": round(float(cumplio.astype(bool).mean() * 100), 1) if len(cumplio) else np.nan,
-            "DESVIACION_PROM": round(float(desv.mean()), 1) if len(desv) else np.nan,
-        })
+    No incluye nada que no salga de los datos: si un mes tiene 0 casos no
+    aparece, y la lista de meses se arma sola.
+    """
+    meta = vista["meta"]
+    corte_txt = meta["corte"].strftime("%d de %B").replace(
+        "January", "enero").replace("February", "febrero").replace(
+        "March", "marzo").replace("April", "abril").replace("May", "mayo").replace(
+        "June", "junio").replace("July", "julio").replace("August", "agosto").replace(
+        "September", "septiembre").replace("October", "octubre").replace(
+        "November", "noviembre").replace("December", "diciembre")
 
-    tabla = pd.DataFrame(filas)
-    if tabla.empty:
-        return tabla
-    return tabla.sort_values("DIAS_CIERRE_MEDIANA", ascending=False).reset_index(drop=True)
-
-
-def _calidad(crudo: pd.DataFrame, casos: pd.DataFrame, cosecha: pd.DataFrame, mapa: pd.DataFrame) -> dict:
-    """Hallazgos de calidad de datos que el operador debe conocer."""
-    culpas_vacias = pd.Series(dtype=str)
-    culpas_crudas = casos[COL_CULPA] if COL_CULPA in casos.columns else culpas_vacias
-    culpas_ok = {
-        "TECNICO", "LOGISTICO", "ALIADO", "BANCO", "ACTIVOS",
-        "MESA-COLSOF", "MESA-TECNICO", "LOGISTICO/TECNICO", "MESA",
-    }
-    estados_vacios = pd.Series(dtype=str)
-    estados_crudos = cosecha[COL_ESTADO_DIARIO] if COL_ESTADO_DIARIO in cosecha.columns else estados_vacios
-
-    return {
-        "filas_leidas": int(len(crudo)),
-        "filas_desalineadas": int(crudo["FILA_DESALINEADA"].sum()),
-        "duplicados": int(crudo["DUPLICADO"].sum()),
-        "fechas_corregidas": int(casos["FECHA_CORREGIDA"].sum()),
-        "sin_fecha": int(casos["FECHA_CREACION"].isna().sum()),
-        "sin_vencimiento": int(casos["VENCIMIENTO"].isna().sum()),
-        "sin_tecnico": int(casos[COL_TECNICO].isna().sum() + casos[COL_TECNICO].eq("").sum()),
-        "tecnicos_a_revisar": mapa[mapa["CONFIANZA"] != "ALTA"].to_dict("records"),
-        "culpas_no_reconocidas": sorted(
-            set(culpas_crudas.dropna().unique()) - culpas_ok - {""}
-        ),
-        "estados_diarios": sorted(
-            set(estados_crudos.dropna().map(normalizar).unique()) - {""}
-        ),
-        "cierre_disponible": bool(
-            "DIAS_CIERRE" in casos.columns and casos["DIAS_CIERRE"].notna().any()
-        ),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Informe de texto
-# ---------------------------------------------------------------------------
-
-def informe_consola(resultado: dict) -> str:
-    """Resumen legible del analisis, para consola y para pruebas."""
-    meta = resultado["meta"]
-    casos = resultado["casos"]
-    tecnicos = resultado["tecnicos"]
-    lineas = []
-    ap = lineas.append
-
-    ap("=" * 78)
-    ap("PLAN DE TRABAJO - analisis de cartera vencida")
-    ap("=" * 78)
-    ap(f"Momento de calculo : {meta['momento']:%Y-%m-%d %H:%M}")
-    ap(f"Casos leidos       : {meta['casos_leidos']}")
-    ap(f"Casos analizados   : {meta['casos_analizados']}")
-    ap(f"Fechas corregidas  : {meta['fechas_corregidas']} (invertidas por Excel)")
-    ap(f"Filas desalineadas : {meta['filas_desalineadas']}")
-    ap(f"Duplicados         : {meta['duplicados']}")
-    ap(f"Con vencimiento    : {meta['con_vencimiento']}")
-    ap("")
-
-    ap("--- ENVEJECIMIENTO (dias desde la creacion) ---")
-    edad = casos["DIAS_ABIERTO"].dropna()
-    if len(edad):
-        ap(f"  promedio {edad.mean():.0f} d | mediana {edad.median():.0f} d | max {edad.max():.0f} d")
-    for tramo in ORDEN_TRAMO:
-        n = int((casos["TRAMO_EDAD"] == tramo).sum())
-        ap(f"  {tramo:22s} {n:4d}")
-    ap("")
-
-    ap("--- ANS (dias vencidos) ---")
-    ans = casos["DIAS_VENCIDO"].dropna()
-    if len(ans):
-        ap(f"  promedio {ans.mean():.0f} d | mediana {ans.median():.0f} d | max {ans.max():.0f} d")
-    for tramo in ORDEN_ANS:
-        n = int((casos["TRAMO_ANS"] == tramo).sum())
-        ap(f"  {tramo:22s} {n:4d}")
-    ap("")
-
-    ap("--- POR TECNICO ---")
-    if not tecnicos.empty:
-        ap(f"  {'TECNICO':30s} {'CASOS':>6s} {'EDAD':>6s} {'ANS':>6s} {'>30d':>5s} {'>90d':>5s}")
-        for _, r in tecnicos.iterrows():
-            ap(f"  {str(r['TECNICO'])[:30]:30s} {r['CASOS']:6d} "
-               f"{r['EDAD_PROM']:6.0f} {r['ANS_PROM']:6.0f} {r['MAS_30D']:5d} {r['ANS_SOBRE_90']:5d}")
-    ap("")
-
-    cal = resultado["calidad"]
-    if cal.get("cierre_disponible"):
-        cierre = resultado.get("cierre")
-        ap("")
-        ap("--- VELOCIDAD DE CIERRE ---")
-        if cierre is not None and not cierre.empty:
-            ap(f"  {'TECNICO':30s} {'CASOS':>6s} {'CERR':>5s} {'ABIERT':>7s} {'D.CIERRE':>9s} {'%CUMPL':>7s}")
-            for _, r in cierre.iterrows():
-                ap(f"  {str(r['TECNICO'])[:30]:30s} {r['CASOS']:6d} {r['CERRADOS']:5d} "
-                   f"{r['ABIERTOS']:7d} {r['DIAS_CIERRE_MEDIANA']:9.0f} {r['PCT_CUMPLIO']:7.0f}")
-    else:
-        ap("")
-        ap("--- VELOCIDAD DE CIERRE ---")
-        ap("  No medible: falta ESTADO y FECHA DE CIERRE en la hoja Casos_Ven.")
-        ap("  Ejecute crear_plantilla_plan.py para agregarlas.")
-
-    if cal["tecnicos_a_revisar"]:
-        ap("--- TECNICOS A REVISAR ---")
-        for fila in cal["tecnicos_a_revisar"]:
-            ap(f"  {fila['ORIGINAL']!r} -> {fila['METODO']} {fila['CANDIDATOS']}")
-    if cal["culpas_no_reconocidas"]:
-        ap("--- CULPAS NO RECONOCIDAS ---")
-        ap("  " + ", ".join(map(str, cal["culpas_no_reconocidas"])))
-
-    return "\n".join(lineas)
+    partes = [
+        "Se adjunta la evidencia consolidada del total de casos por técnico "
+        f"regional, con corte de {corte_txt}.",
+        "",
+        f"Total de casos en curso en toda la operación: {vista['total']} casos",
+    ]
+    if vista["por_mes"]:
+        desglose = " | ".join(
+            f"{m['etiqueta']}: {m['casos']}" for m in vista["por_mes"]
+        )
+        partes.append(desglose)
+    partes.append(f"Técnicos con casos activos: {meta['tecnicos']}")
+    return "\n".join(partes)

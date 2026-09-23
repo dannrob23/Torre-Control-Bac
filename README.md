@@ -162,8 +162,8 @@ información detallada del caso seleccionado.
 
 El dashboard tiene seis pestañas: **🎯 Despacho Operativo**, **📋 Explorador de
 Casos & SLA**, **📊 Analítica & Técnicos**, **📜 Historial & Auditoría**,
-**🗂️ Plan de Trabajo & ANS** y **🔍 Integridad de datos**. La quinta trabaja
-sobre el Plan de Trabajo mensual — ver [Plan de Trabajo y ANS](#plan-de-trabajo-y-ans-planpy).
+**🗂️ Plan de Trabajo & ANS** y **🔍 Integridad de datos**. La quinta es el
+tablero gerencial del Plan de Trabajo — ver [Plan de Trabajo](#plan-de-trabajo--tablero-gerencial-planpy).
 
 ---
 
@@ -269,8 +269,7 @@ Torre-Control-Bac/
 ├── README.md               # Este archivo
 ├── requirements.txt        # Dependencias Python
 ├── core.py                 # Lógica central (lectura, SLA, regiones)
-├── plan.py                 # Analítica del Plan de Trabajo (ANS, envejecimiento)
-├── crear_plantilla_plan.py # Agrega ESTADO y FECHA DE CIERRE al Plan de Trabajo
+├── plan.py                 # Tablero gerencial del Plan de Trabajo
 ├── alertas_windows.py      # Notificaciones de escritorio
 ├── app_gui.py              # Interfaz gráfica de escritorio (Tkinter)
 ├── dashboard.py            # Dashboard web (Streamlit)
@@ -286,81 +285,67 @@ Torre-Control-Bac/
 
 ---
 
-### Plan de Trabajo y ANS (`plan.py`)
+### Plan de Trabajo — tablero gerencial (`plan.py`)
 
-La pestaña **🗂️ Plan de Trabajo & ANS** del dashboard analiza el archivo mensual
-del Plan de Trabajo (hoja `Casos_Ven`), que es distinto de la plantilla SLA.
-Responde otra pregunta: no *qué se vence ahora*, sino *cómo está envejeciendo la
-cartera y quién la acumula*.
+La pestaña **🗂️ Plan de Trabajo & ANS** es un tablero **para gerencia**: responde
+tres preguntas y nada más.
+
+> Resumen de una línea: *cuántos casos hay, de qué meses son y quién los tiene.*
 
 Sube el archivo desde la barra lateral (**🗂️ Cargar Plan de Trabajo**, o el
-cargador principal: se reconoce y enruta solo) y obtendrás:
+cargador principal: se reconoce y enruta solo).
 
 | Bloque | Qué responde |
 |---|---|
-| 🔴 ANS | Días vencidos por caso y por técnico, con tramos 1-7 / 8-30 / 31-90 / >90 |
-| ⏱️ Envejecimiento | Días abierto desde la creación, con tramos ≤7 / 8-15 / 16-30 / >30 |
-| 👷 Por técnico | Volumen **y** gravedad de la cartera de cada uno |
-| 🚧 Culpa | Distribución y % de vencimiento evitable (técnico + logístico) |
-| ⏱️ Velocidad de cierre | Tiempo de cierre y cumplimiento del ANS (requiere dos columnas) |
-| 📋 Calidad de datos | Fechas invertidas, duplicados, filas desalineadas |
+| 🔢 Casos en curso | Total a la fecha de corte |
+| 📅 Por mes | Reparto entre los meses que aparezcan en los datos |
+| 📈 Evolución semanal | Cómo se mueve la carga semana a semana |
+| 👷 Por técnico | Ranking de casos por usuario, de mayor a menor |
+| 🕐 Más antiguos | Los 10 casos que llevan más tiempo abiertos |
+| 📋 Resumen para correo | Texto listo para copiar y pegar |
 
-#### ⚠️ Las fechas de `Casos_Ven` vienen invertidas
+**Fuente de datos:** las **hojas diarias** (`23_Septiembre`, `22_Septiembre`, …),
+que son la foto de los casos *en curso* ese día. **No** se usa la hoja
+`Casos_Ven`, que es el histórico de vencidos (abiertos y cerrados).
+
+#### Controles de la barra lateral
+
+- **Fecha de corte** — por defecto, la última hoja del archivo.
+- **Estados que cuentan como en curso** — por defecto `En curso` y
+  `Trabajo en curso`. Al excluir `Suspendido`, `Ready` y `Work in progress` es
+  cuando el total coincide con el seguimiento que ya se envía por correo.
+
+#### ⚠️ Las fechas de apertura vienen invertidas
 
 Excel convirtió los textos colombianos `DD/MM/AAAA` a fecha nativa aplicando el
 formato `m/d/yy`, así que **cuando el día era ≤ 12 mes y día quedaron
-intercambiados** (el 1 de septiembre se guardó como 9 de enero). El problema es
-que `09/01/2026` es ambiguo: no se puede saber mirando la celda.
+intercambiados**. El caso típico: `IM3238157` figura como **9 de octubre** cuando
+en realidad se abrió el **10 de septiembre** — una fecha imposible, porque es
+posterior al corte.
 
 `plan.py` lo resuelve con la **secuencia de IDs de caso**, que es monótona (el ID
 máximo de cada hoja diaria crece ~100 por día). Cada fecha se contrasta contra
-ese modelo y solo se invierte si así queda más cerca. Medido sobre septiembre
-2026: la lectura día/mes da 3.6 días de error medio frente a 75.7 de la lectura
-mes/día.
+ese modelo y solo se invierte si así queda más cerca. Si una fecha no tiene
+referencia, **se conserva tal cual: no se adivina**.
 
-Sin esta corrección la antigüedad promedio sale **~4x inflada** (83 días en lugar
-de 22). Si una fecha no tiene referencia, **se conserva tal cual: no se adivina**.
+Sin esta corrección el reparto por mes —uno de los tres números del tablero—
+saldría mal y aparecerían casos "abiertos en el futuro".
 
-#### ⏱️ Activar la velocidad de cierre
+#### Rendimiento
 
-`Casos_Ven` no trae estado ni fecha de cierre, así que la velocidad de cierre no
-es medible con el archivo tal como viene. No se deduce de las hojas diarias a
-propósito: un caso abierto y uno cerrado desaparecen igual y no son
-distinguibles.
+La lectura del Excel (20 hojas) y el modelo de fechas se cachean por contenido
+de archivo. La primera lectura tarda ~12 s; cambiar la fecha de corte después
+toma menos de 0,1 s. Sin la caché, cada interacción con el tablero releía el
+archivo completo.
 
-Para activarla, ejecuta una vez:
+#### Por qué los técnicos se muestran como usuario
 
-```powershell
-python crear_plantilla_plan.py "C:\ruta\Septiembre_2026_Plan de Trabajo.xlsx"
-```
-
-Genera una copia `..._con_estado.xlsx` con dos columnas nuevas (el original no se
-toca):
-
-- **`ESTADO`** — con lista desplegable (`ABIERTO`, `EN CURSO`, `CERRADO A
-  TIEMPOS`, `CERRADO TARDE`, …) para evitar las variantes escritas a mano que hoy
-  tienen las hojas diarias.
-- **`FECHA DE CIERRE`** — con formato `DD/MM/YYYY` para que Excel no la vuelva a
-  invertir.
-
-Quedan **vacías a propósito**. Al llenarlas, el tablero calcula tiempo de cierre,
-cumplimiento del ANS, días de desviación y backlog real automáticamente.
-
-#### 🔎 Reconocimiento automático del archivo
-
-El cargador **no exige saber qué archivo es**. Al subir un `.xlsx`, el sistema
-mira sus hojas y decide:
-
-| Hojas encontradas | Tipo | Qué hace |
-|---|---|---|
-| `PLANTILLA` (o `PLANTILLA …`) | Plantilla SLA | Carga el tablero de SLA |
-| `Casos_Ven` y/o hojas `N_Mes` | Plan de Trabajo | Lo envía a la pestaña 🗂️ |
-| Ninguna de las anteriores | Desconocido | Lo dice y lista las hojas que sí trae |
-
-Esto evita el error clásico de subir el Plan de Trabajo en la casilla de la
-plantilla y recibir un `ValueError: Worksheet named 'PLANTILLA' not found` de
-openpyxl, que no explica nada. Ahora el archivo se enruta solo y, si no hay
-plantilla SLA cargada, las pestañas de SLA avisan en vez de romperse.
+La hoja diaria identifica al técnico por **usuario** (`snoelsno`, `jofejach`) y
+no por nombre. Traducirlo automáticamente es arriesgado: en el catálogo hay
+4 personas llamadas CARLOS, 3 CRISTIAN y 2 JORGE, y la regla por iniciales solo
+acierta 4 de 24 usuarios. Un nombre equivocado en un informe de gerencia es peor
+que un usuario, así que se muestra el usuario tal cual, con una columna de zona
+(`Bogotá` / `Regional`).
 
 ---
 

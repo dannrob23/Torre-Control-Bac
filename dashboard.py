@@ -1435,16 +1435,25 @@ def render_plan_trabajo() -> None:
             return
 
         opciones = sorted(hojas.items(), key=lambda kv: kv[1], reverse=True)
-        etiqueta_a_fecha = {
+        ETIQUETA_TODOS = "Todos (acumulado del período)"
+        # El orden pone primero la fecha mas reciente (el caso de uso normal) y
+        # "Todos" al final, para no cambiar lo que se ve al abrir la pestana.
+        etiqueta_a_corte = {
             f"{fecha:%d/%m/%Y} · {nombre}": fecha for nombre, fecha in opciones
         }
+        etiqueta_a_corte[ETIQUETA_TODOS] = plan.MODO_TODOS
         elegida = st.selectbox(
             "Fecha de corte",
-            list(etiqueta_a_fecha.keys()),
+            list(etiqueta_a_corte.keys()),
             index=0,
-            help="Por defecto, la última hoja disponible en el archivo.",
+            help=(
+                "**Todos** muestra el acumulado: todos los casos vistos en las "
+                "hojas diarias hasta el corte, sin repetir los que aparecen en "
+                "varias. Una fecha concreta muestra solo la foto de ese día."
+            ),
         )
-        corte = etiqueta_a_fecha[elegida]
+        corte = etiqueta_a_corte[elegida]
+        es_acumulado = corte == plan.MODO_TODOS
 
         st.markdown("**Estados que cuentan como en curso**")
         incluir = {}
@@ -1480,7 +1489,17 @@ def render_plan_trabajo() -> None:
         "September", "septiembre").replace("October", "octubre").replace(
         "November", "noviembre").replace("December", "diciembre")
 
-    st.markdown(f"##### Corte: {corte_txt}")
+    if meta.get("acumulado"):
+        st.markdown(
+            f"##### Acumulado del período — hasta el {corte_txt}"
+        )
+        st.caption(
+            "Todos los casos vistos en las hojas diarias hasta esa fecha, sin "
+            "repetir los que aparecen en varias. Para ver un solo día, elija la "
+            "fecha en la barra lateral."
+        )
+    else:
+        st.markdown(f"##### Corte: {corte_txt}")
 
     if vista["total"] == 0:
         st.warning("No hay casos en curso con ese corte y esos estados.")
@@ -1489,7 +1508,15 @@ def render_plan_trabajo() -> None:
     # --- KPIs -------------------------------------------------------------
     meses = vista["por_mes"]
     columnas = st.columns(2 + len(meses) + 1)
-    columnas[0].metric("Casos en curso", vista["total"])
+    columnas[0].metric(
+        "Casos del período" if meta.get("acumulado") else "Casos en curso",
+        vista["total"],
+        help=(
+            "Casos distintos vistos en las hojas diarias hasta el corte."
+            if meta.get("acumulado")
+            else "Casos en curso en la hoja del corte."
+        ),
+    )
     for i, m in enumerate(meses):
         columnas[1 + i].metric(m["etiqueta"], m["casos"])
     columnas[-1].metric("Técnicos", meta["tecnicos"])
@@ -1602,7 +1629,15 @@ def render_plan_trabajo() -> None:
 
     with st.expander("🔎 ¿De dónde sale el total?"):
         c = vista["conciliacion"]
-        st.markdown(f"**Hoja usada:** `{c['hoja_corte']}` — {c['leidos_hoja']} casos")
+        if meta.get("acumulado"):
+            st.markdown(
+                f"**Hojas usadas:** todas las diarias hasta el corte — "
+                f"{c['leidos_hoja']} casos distintos"
+            )
+        else:
+            st.markdown(
+                f"**Hoja usada:** `{c['hoja_corte']}` — {c['leidos_hoja']} casos"
+            )
         if c["excluidos"]:
             st.markdown("**No cuentan como en curso:**")
             for e in c["excluidos"]:

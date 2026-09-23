@@ -654,6 +654,10 @@ def corregir_fechas(
 # La hoja diaria trae ademas Suspendido, Ready y Work In Progress, que NO son
 # trabajo activo; excluirlos es lo que hace cuadrar el total con el seguimiento
 # que ya se envia por correo.
+# Valor especial del parametro ``corte``: en lugar de la foto de un dia,
+# devuelve el acumulado de todas las hojas diarias (sin repetir casos).
+MODO_TODOS = "todos"
+
 ESTADOS_EN_CURSO = (
     "EN CURSO",
     "TRABAJO EN CURSO",
@@ -808,9 +812,12 @@ def vista_gerencial(
     )
 
     # --- corte ------------------------------------------------------------
+    # ``MODO_TODOS`` no es una fecha: devuelve el acumulado del periodo.
+    acumulado = isinstance(corte, str) and corte.strip().lower() == MODO_TODOS
+
     hojas_ordenadas = sorted(hojas.items(), key=lambda kv: kv[1])
     ultima_hoja, fecha_ultima = hojas_ordenadas[-1]
-    if corte is None:
+    if corte is None or acumulado:
         corte_ts = fecha_ultima + pd.Timedelta(hours=23, minutes=59)
     else:
         corte_ts = pd.Timestamp(corte)
@@ -821,8 +828,22 @@ def vista_gerencial(
         if fecha <= corte_ts:
             hoja_corte = nombre
 
-    # --- casos en curso en la hoja del corte ------------------------------
-    del_corte = cosecha[cosecha["HOJA"] == hoja_corte].copy()
+    # Hojas que entran en el calculo
+    if acumulado:
+        seleccion = cosecha[
+            cosecha["FECHA_HOJA"] <= (corte_ts - pd.Timedelta(hours=23, minutes=59))
+        ].copy()
+        # Un caso puede aparecer en varias hojas: se conserva el ultimo estado
+        # de cada uno, para no contarlo dos veces.
+        seleccion = (
+            seleccion.sort_values("FECHA_HOJA")
+            .drop_duplicates(subset=[COL_ID_DIARIO], keep="last")
+        )
+        del_corte = seleccion
+        hoja_corte = "todas las hojas"
+    else:
+        del_corte = cosecha[cosecha["HOJA"] == hoja_corte].copy()
+
     del_corte[COL_ESTADO_DIARIO] = del_corte[COL_ESTADO_DIARIO].map(
         lambda v: normalizar(v) if pd.notna(v) else ""
     )
@@ -965,6 +986,7 @@ def vista_gerencial(
         "meta": {
             "corte": corte_ts,
             "hoja_corte": hoja_corte,
+            "acumulado": bool(acumulado),
             "desde": desde_ts,
             "hasta": hasta_ts,
             "estados": [normalizar(e) for e in estados],
@@ -1021,11 +1043,16 @@ def resumen_para_correo(vista: dict) -> str:
         "September", "septiembre").replace("October", "octubre").replace(
         "November", "noviembre").replace("December", "diciembre")
 
+    acumulado = bool(vista["meta"].get("acumulado"))
     partes = [
         "Se adjunta la evidencia consolidada del total de casos por técnico "
         f"regional, con corte de {corte_txt}.",
         "",
-        f"Total de casos en curso en toda la operación: {vista['total']} casos",
+        (
+            f"Total de casos atendidos en el período: {vista['total']} casos"
+            if acumulado
+            else f"Total de casos en curso en toda la operación: {vista['total']} casos"
+        ),
     ]
     if vista["por_mes"]:
         desglose = " | ".join(

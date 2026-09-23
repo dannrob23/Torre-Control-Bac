@@ -1073,16 +1073,22 @@ def vista_vencidos(
     archivo: str | bytes,
     *,
     hoja: str = HOJA_VENCIDOS,
-    corregir: bool = True,
+    corregir: bool = False,
 ) -> dict:
     """
     Arma el listado completo de la hoja Casos_Ven con sus totales.
 
     Parametros
     ----------
-    corregir : si es ``True`` (por defecto) las fechas de creacion se contrastan
-        contra el modelo de la secuencia de IDs y se corrigen las que venian con
-        mes y dia intercambiados. Si es ``False`` se dejan tal como estan.
+    corregir : DESACTIVADO por defecto a proposito. La hoja Casos_Ven guarda
+        las fechas en formato mes/dia (con "9/01/2026" queriendo decir 1 de
+        septiembre) y ya estan correctas, asi que invertirlas las estropearia.
+        El modelo de secuencia de IDs que si se necesita es el de las hojas
+        diarias, y se aplica en la pestana 'Plan de Trabajo'.
+
+        Si algun mes se guardara en formato dia/mes, poner ``corregir=True``
+        contrasta cada fecha contra ese modelo y solo invierte las que quedan
+        mas cerca del valor esperado.
 
     Devuelve un diccionario con:
 
@@ -1201,3 +1207,82 @@ def vista_vencidos(
             if COL_CULPA in casos.columns else 0,
         },
     }
+
+
+def validar_fechas_vencidos(
+    archivo: str | bytes,
+    *,
+    hoja: str = HOJA_VENCIDOS,
+) -> dict:
+    """
+    Verifica las fechas de Casos_Ven cruzándolas con otra fuente.
+
+    La hoja diaria guarda, para cada caso, la fecha de apertura que registra el
+    banco. Si esa fecha y la de creacion de Casos_Ven coinciden, las dos estan
+    bien y no hay que corregir nada.
+
+    Este contraste es el que zanja la duda de si las fechas vienen con mes y dia
+    intercambiados: una sola columna es ambigua (9/01/2026 puede ser 9 de enero
+    o 1 de septiembre), pero dos fuentes independientes que coinciden no.
+
+    Devuelve ``{"comparables", "coinciden", "difieren", "pct", "ejemplos",
+    "por_mes_diario", "por_mes_vencidos"}``.
+    """
+    if isinstance(archivo, (bytes, bytearray)):
+        datos = bytes(archivo)
+    else:
+        with open(archivo, "rb") as fh:
+            datos = fh.read()
+
+    casos = leer_vencidos(datos, hoja=hoja)
+    casos = casos[~casos["FILA_DESALINEADA"]].drop_duplicates(
+        subset=[COL_CASO], keep="first"
+    )
+    casos["FECHA"] = pd.to_datetime(
+        casos[COL_FECHA_CREACION], errors="coerce", format="mixed", dayfirst=False
+    )
+
+    cosecha = leer_cosecha_diaria(datos, inferir_anio(casos))
+    aperturas = pd.to_datetime(cosecha[COL_APERTURA], errors="coerce")
+    primera = (
+        pd.DataFrame({COL_CASO: cosecha[COL_ID_DIARIO].astype(str).str.strip(),
+                      "AP": aperturas})
+        .dropna(subset=["AP"])
+        .groupby(COL_CASO)["AP"].min()
+    )
+
+    casos["EN_DIARIO"] = casos[COL_CASO].map(primera)
+    compara = casos.dropna(subset=["FECHA", "EN_DIARIO"]).copy()
+    compara["DIF_DIAS"] = (
+        compara["FECHA"] - compara["EN_DIARIO"]
+    ).dt.total_seconds() / 86400
+    compara["COINCIDE"] = compara["DIF_DIAS"].abs() < 1
+
+    def reparto(columna) -> list:
+        conteo = compara[columna].dt.to_period("M").value_counts().sort_index()
+        return [
+            {"mes": str(k), "etiqueta": _ETIQUETA_MES.get(k.month, str(k.month)),
+             "casos": int(v)}
+            for k, v in conteo.items()
+        ]
+
+    coinciden = int(compara["COINCIDE"].sum())
+    total = int(len(compara))
+
+    return {
+        "comparables": total,
+        "coinciden": coinciden,
+        "difieren": total - coinciden,
+        "pct": round(coinciden / total * 100, 1) if total else 0.0,
+        "ejemplos": [
+            {
+                "caso": str(r[COL_CASO]),
+                "vencidos": r["FECHA"],
+                "diario": r["EN_DIARIO"],
+            }
+            for _, r in compara[~compara["COINCIDE"]].head(10).iterrows()
+        ],
+        "por_mes_diario": reparto("EN_DIARIO"),
+        "por_mes_vencidos": reparto("FECHA"),
+    }
+

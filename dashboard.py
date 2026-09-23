@@ -1768,6 +1768,58 @@ def render_casos_ven() -> None:
             width="stretch", hide_index=True,
         )
 
+    # --- Validacion de las fechas con una fuente independiente -----------
+    with st.expander("✅ ¿Están bien las fechas de esta hoja?"):
+        st.caption(
+            "Las fechas se contrastan contra la fecha de apertura que el "
+            "banco registra en las hojas diarias. Son dos fuentes "
+            "independientes: si coinciden, la fecha está confirmada."
+        )
+        try:
+            val = plan.validar_fechas_vencidos(contenido)
+        except Exception as exc:
+            st.warning("No se pudo hacer el contraste con las hojas diarias.")
+            st.code(f"{type(exc).__name__}: {exc}")
+        else:
+            if val["comparables"] == 0:
+                st.info("No hay casos comparables con las hojas diarias.")
+            elif val["difieren"] == 0:
+                st.success(
+                    f"**Las {val['comparables']} fechas comparables coinciden "
+                    "exactamente** con la fecha de apertura de las hojas "
+                    "diarias. No hay nada que corregir.",
+                    icon="✅",
+                )
+            else:
+                st.warning(
+                    f"Coinciden **{val['coinciden']} de {val['comparables']}** "
+                    f"({val['pct']}%). Hay **{val['difieren']}** que no cuadran:",
+                    icon="⚠️",
+                )
+                st.dataframe(
+                    pd.DataFrame(val["ejemplos"]).rename(columns={
+                        "caso": "Caso", "vencidos": "Casos_Ven",
+                        "diario": "Hoja diaria",
+                    }),
+                    width="stretch", hide_index=True,
+                )
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("**Por mes — fuente diaria**")
+                st.dataframe(
+                    pd.DataFrame(val["por_mes_diario"])[["etiqueta", "casos"]]
+                    .rename(columns={"etiqueta": "Mes", "casos": "Casos"}),
+                    width="stretch", hide_index=True,
+                )
+            with c2:
+                st.markdown("**Por mes — Casos_Ven**")
+                st.dataframe(
+                    pd.DataFrame(val["por_mes_vencidos"])[["etiqueta", "casos"]]
+                    .rename(columns={"etiqueta": "Mes", "casos": "Casos"}),
+                    width="stretch", hide_index=True,
+                )
+
     st.divider()
 
     # --- Detalle ----------------------------------------------------------

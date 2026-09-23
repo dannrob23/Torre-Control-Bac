@@ -166,12 +166,45 @@ def _buscar_columna(df: pd.DataFrame, nombres: list[str]) -> str | None:
 # Deteccion de hojas
 # ---------------------------------------------------------------------------
 
-def hojas_diarias(nombres_hojas) -> dict[str, pd.Timestamp]:
+PATRON_ANIO = re.compile(r"(\d{4})")
+
+
+def inferir_anio(crudo: pd.DataFrame, columna: str = COL_FECHA_CREACION) -> int:
+    """
+    Deduce el anio del plan a partir de las fechas del propio archivo.
+
+    El nombre de las hojas diarias no trae el anio ("17_Septiembre"), asi que se
+    toma de las fechas de creacion: se busca un anio de 4 digitos en el texto o,
+    si la celda es una fecha nativa, su propio anio. Se usa el valor mas
+    frecuente, que es robusto frente a celdas corruptas.
+
+    Esto evita tener que actualizar una constante cada enero.
+    """
+    if columna not in crudo.columns:
+        return ANIO_DEFECTO
+
+    anios: list[int] = []
+    for valor in crudo[columna].dropna():
+        if isinstance(valor, pd.Timestamp):
+            anios.append(valor.year)
+            continue
+        coincidencias = PATRON_ANIO.findall(str(valor))
+        for texto in coincidencias:
+            anio = int(texto)
+            if 2000 <= anio <= 2100:
+                anios.append(anio)
+
+    if not anios:
+        return ANIO_DEFECTO
+    return pd.Series(anios).mode().iloc[0]
+
+
+def hojas_diarias(nombres_hojas, anio: int = ANIO_DEFECTO) -> dict[str, pd.Timestamp]:
     """
     Detecta las hojas diarias del libro y devuelve ``{nombre_hoja: fecha}``.
 
     Se apoya en el nombre de la hoja ("17_Septimbre") aceptando el typo. Si el
-    anio no aparece en el nombre se asume ``anio_defecto``.
+    anio aparece en el nombre se usa ese; si no, ``anio``.
 
     No se usa el orden de las hojas ni su contenido: solo el nombre.
     """
@@ -184,9 +217,9 @@ def hojas_diarias(nombres_hojas) -> dict[str, pd.Timestamp]:
         mes = MESES_ES.get(normalizar(m.group(2)).lower())
         if mes is None or not 1 <= dia <= 31:
             continue
-        anio = ANIO_DEFECTO
+        anio_hoja = anio
         try:
-            detectadas[str(nombre)] = pd.Timestamp(anio, mes, dia)
+            detectadas[str(nombre)] = pd.Timestamp(anio_hoja, mes, dia)
         except ValueError:
             continue
     return detectadas
@@ -284,15 +317,17 @@ def leer_vencidos(archivo: str | bytes, hoja: str = HOJA_VENCIDOS) -> pd.DataFra
     return df
 
 
-def leer_cosecha_diaria(archivo: str | bytes) -> pd.DataFrame:
+def leer_cosecha_diaria(archivo: str | bytes, anio: int = ANIO_DEFECTO) -> pd.DataFrame:
     """
     Concatena todas las hojas diarias en un solo DataFrame.
 
     Cada fila es un caso visto en el tablero operativo de un dia. De aqui sale
     el ``Vencimiento`` (compromiso ANS) que la hoja de vencidos NO tiene.
+
+    ``anio`` es el anio del plan: los nombres de hoja no lo traen.
     """
     nombres = _nombres_hojas(archivo)
-    diarias = hojas_diarias(nombres)
+    diarias = hojas_diarias(nombres, anio)
     if not diarias:
         raise ErrorPlan(
             "No se detecto ninguna hoja diaria (se esperaban nombres como "
@@ -650,7 +685,10 @@ def analizar(
             momento = pd.Timestamp.now()
 
     crudo = leer_vencidos(archivo, hoja=hoja_vencidos)
-    cosecha = leer_cosecha_diaria(archivo)
+    # El anio del plan se deduce del propio archivo: los nombres de hoja no lo
+    # traen ("17_Septiembre") y no se quiere una constante que caduque.
+    anio = inferir_anio(crudo)
+    cosecha = leer_cosecha_diaria(archivo, anio)
     modelos = modelo_ids_a_fecha(cosecha)
 
     # --- fechas de creacion corregidas -----------------------------------
@@ -736,6 +774,7 @@ def analizar(
         "cosecha": cosecha,
         "meta": {
             "momento": momento,
+            "anio": anio,
             "modelos": modelos,
             "casos_leidos": int(len(crudo)),
             "casos_analizados": int(len(casos)),

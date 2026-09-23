@@ -285,67 +285,63 @@ Torre-Control-Bac/
 
 ---
 
-### Plan de Trabajo — tablero gerencial (`plan.py`)
+### Plan de Trabajo (`plan.py`)
 
-La pestaña **🗂️ Plan de Trabajo & ANS** es un tablero **para gerencia**: responde
-tres preguntas y nada más.
+La pestaña **🗂️ Plan de Trabajo & ANS** muestra **únicamente el contenido de la
+hoja `Casos_Ven`** del archivo mensual del plan: los casos vencidos del mes, tal
+como están en la hoja.
 
-> Resumen de una línea: *cuántos casos hay, de qué meses son y quién los tiene.*
+No usa las hojas diarias (`23_Septiembre`, `22_Septiembre`, …). Aquellas
+responden a otra pregunta —*qué había abierto ese día*— y mezclarlas confundía la
+lectura.
 
 Sube el archivo desde la barra lateral (**🗂️ Cargar Plan de Trabajo**, o el
 cargador principal: se reconoce y enruta solo).
 
 | Bloque | Qué responde |
 |---|---|
-| 🔢 Casos en curso | Total a la fecha de corte |
-| 📅 Por mes | Reparto entre los meses que aparezcan en los datos |
-| 📈 Evolución semanal | Cómo se mueve la carga semana a semana |
-| 👷 Por técnico | Ranking de casos por usuario, de mayor a menor |
-| 🕐 Más antiguos | Los 10 casos que llevan más tiempo abiertos |
-| 📋 Resumen para correo | Texto listo para copiar y pegar |
+| 🔢 Casos | Las filas de `Casos_Ven` (145) y los casos únicos (142) |
+| 📅 Por mes | Reparto por mes de creación |
+| 👷 Por técnico | Cuántos lleva cada uno |
+| 🚧 Por culpa | Técnico, logístico, aliado, banco, activos… |
+| 📋 Detalle | Caso, ubicación, fecha, técnico, culpa, justificación |
+| ✅ Fechas | Contraste con una fuente independiente |
 
-**Fuente de datos:** las **hojas diarias** (`23_Septiembre`, `22_Septiembre`, …),
-que son la foto de los casos *en curso* ese día. **No** se usa la hoja
-`Casos_Ven`, que es el histórico de vencidos (abiertos y cerrados).
+Filtros por mes, técnico, culpa y categoría. Dos descargas en CSV: los casos
+filtrados y los totales.
 
-#### Controles de la barra lateral
+#### Por qué 145 filas dan 142 casos
 
-- **Fecha de corte** — por defecto, la última hoja del archivo.
-- **Estados que cuentan como en curso** — por defecto `En curso` y
-  `Trabajo en curso`. Al excluir `Suspendido`, `Ready` y `Work in progress` es
-  cuando el total coincide con el seguimiento que ya se envía por correo.
+La hoja trae **3 filas descartadas**: dos casos repetidos (`IM3237290-001` y
+`IM3237741` aparecen dos veces) y una fila con los datos corridos (`IM3237658`,
+donde la ubicación cayó en la columna de la fecha). La pestaña lo dice en
+pantalla, para que el total sea explicable.
 
-#### ⚠️ Las fechas de apertura vienen invertidas
+#### Los nombres de técnico se unifican
 
-Excel convirtió los textos colombianos `DD/MM/AAAA` a fecha nativa aplicando el
-formato `m/d/yy`, así que **cuando el día era ≤ 12 mes y día quedaron
-intercambiados**. El caso típico: `IM3238157` figura como **9 de octubre** cuando
-en realidad se abrió el **10 de septiembre** — una fecha imposible, porque es
-posterior al corte.
+La hoja escribe el mismo nombre de formas distintas (`caRLOS JIMENEZ` y `CARLOS
+JIMENEZ`). Se agrupan para no mostrar al mismo técnico dos veces. La columna de
+culpa también se normaliza: `BANCO?`, `BANCOOOOOO` y `BANCOOOO` se agrupan en
+`BANCO`, y `MESA` en `MESA-COLSOF`.
 
-`plan.py` lo resuelve con la **secuencia de IDs de caso**, que es monótona (el ID
-máximo de cada hoja diaria crece ~100 por día). Cada fecha se contrasta contra
-ese modelo y solo se invierte si así queda más cerca. Si una fecha no tiene
-referencia, **se conserva tal cual: no se adivina**.
+#### ⚠️ Las fechas: por qué NO se corrigen
 
-Sin esta corrección el reparto por mes —uno de los tres números del tablero—
-saldría mal y aparecerían casos "abiertos en el futuro".
+Una fecha suelta es ambigua: `9/01/2026` puede ser 9 de enero o 1 de septiembre.
+Decidirlo mirando una sola columna no es posible, y equivocarse cambia todos los
+totales.
 
-#### Rendimiento
+Por eso las fechas se **contrastan con una fuente independiente**: la fecha de
+apertura que el banco registra en las hojas diarias del mismo archivo. Sobre el
+archivo real de septiembre 2026, **141 de 141 casos comparables coinciden
+exactamente**. Las fechas de `Casos_Ven` están confirmadas y no se toca ninguna.
 
-La lectura del Excel (20 hojas) y el modelo de fechas se cachean por contenido
-de archivo. La primera lectura tarda ~12 s; cambiar la fecha de corte después
-toma menos de 0,1 s. Sin la caché, cada interacción con el tablero releía el
-archivo completo.
+El panel **✅ ¿Están bien las fechas?** muestra ese contraste. Si algún mes
+viniera en otro formato, en lugar de confirmar listaría los casos que no cuadran
+y compararía el reparto por mes de las dos fuentes.
 
-#### Por qué los técnicos se muestran como usuario
-
-La hoja diaria identifica al técnico por **usuario** (`snoelsno`, `jofejach`) y
-no por nombre. Traducirlo automáticamente es arriesgado: en el catálogo hay
-4 personas llamadas CARLOS, 3 CRISTIAN y 2 JORGE, y la regla por iniciales solo
-acierta 4 de 24 usuarios. Un nombre equivocado en un informe de gerencia es peor
-que un usuario, así que se muestra el usuario tal cual, con una columna de zona
-(`Bogotá` / `Regional`).
+> Nota: los `9/01/2026`, `9/03/2026` o `9/12/2026` de la hoja son **9 de enero,
+> 9 de marzo y 9 de diciembre**. `Casos_Ven` es el histórico de vencidos del mes,
+> así que incluye casos abiertos en meses anteriores que siguen vencidos.
 
 ---
 

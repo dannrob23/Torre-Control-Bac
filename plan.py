@@ -76,8 +76,6 @@ COL_TECNICO = "TECNICO ENCARGADO"
 COL_JUSTIFICACION = "JUSTIFICACION DE VENCIMIENTO"
 COL_CULPA = "CULPA"
 COL_CATEGORIA = "CATEGORIA"  # columna sin encabezado en el archivo original
-COL_ESTADO = "ESTADO"
-COL_FECHA_CIERRE = "FECHA DE CIERRE"
 
 COL_ID_DIARIO = "ID de incidente"
 COL_VENCIMIENTO = "Vencimiento"
@@ -91,44 +89,13 @@ COL_UBICACION_DIARIA = "Ubicación"
 # que trae la hoja diaria (el nombre de usuario no dice de donde es).
 COL_ATIENDE = "ATIENDE"
 
-# ---------------------------------------------------------------------------
-# Semáforo de antigüedad (dias desde la creacion del caso)
-# ---------------------------------------------------------------------------
 
-EDAD_VERDE = 7
-EDAD_AMARILLO = 15
-EDAD_NARANJA = 30
-
-TRAMO_VERDE = "VERDE (<= 7 d)"
-TRAMO_AMARILLO = "AMARILLO (8-15 d)"
-TRAMO_NARANJA = "NARANJA (16-30 d)"
-TRAMO_ROJO = "ROJO (> 30 d)"
-
-ORDEN_TRAMO = [TRAMO_VERDE, TRAMO_AMARILLO, TRAMO_NARANJA, TRAMO_ROJO]
-
-# ---------------------------------------------------------------------------
-# Semaforo de ANS (dias vencidos respecto al compromiso de la herramienta)
-# ---------------------------------------------------------------------------
-
-ANS_EN_PLAZO = "EN PLAZO"
-ANS_1_7 = "1-7 d vencido"
-ANS_8_30 = "8-30 d vencido"
-ANS_31_90 = "31-90 d vencido"
-ANS_MAS_90 = "> 90 d vencido"
-
-ORDEN_ANS = [ANS_EN_PLAZO, ANS_1_7, ANS_8_30, ANS_31_90, ANS_MAS_90]
 
 # Tolerancia con la que una fecha se considera "coherente" con el modelo de IDs.
 # 7 dias absorbe el ruido del ajuste lineal (los IDs no crecen exactamente igual
 # todos los dias) sin permitir que una fecha de otro mes pase por buena.
 TOLERANCIA_MODELO_DIAS = 7.0
 
-# Valores de CULPA que son errores de digitacion y se agrupan.
-NORMALIZAR_CULPA = {
-    "BANCO?": "BANCO",
-    "BANCOOOOOO": "BANCO",
-    "BANCOOOO": "BANCO",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -412,7 +379,7 @@ def leer_vencidos(archivo: str | bytes, hoja: str = HOJA_VENCIDOS) -> pd.DataFra
             df[col] = df[col].map(lambda v: normalizar(v) if pd.notna(v) else "")
 
     if COL_CULPA in df.columns:
-        df[COL_CULPA] = df[COL_CULPA].replace(NORMALIZAR_CULPA)
+        df[COL_CULPA] = df[COL_CULPA].replace(NORMALIZAR_CULPA_VEN)
 
     return df
 
@@ -632,9 +599,6 @@ def corregir_fechas(
 
 
 
-# ===========================================================================
-# VISTA GERENCIAL — casos en curso
-# ===========================================================================
 #
 # Esta seccion reemplaza los indicadores de operacion (ANS por tramos,
 # envejecimiento, culpa, velocidad de cierre). El objetivo es otro: un tablero
@@ -656,425 +620,26 @@ def corregir_fechas(
 # que ya se envia por correo.
 # Valor especial del parametro ``corte``: en lugar de la foto de un dia,
 # devuelve el acumulado de todas las hojas diarias (sin repetir casos).
-MODO_TODOS = "todos"
-
-ESTADOS_EN_CURSO = (
-    "EN CURSO",
-    "TRABAJO EN CURSO",
-)
-
-# Etiquetas cortas para la interfaz (la hoja mezcla mayusculas y variantes).
-ETIQUETA_ESTADO = {
-    "EN CURSO": "En curso",
-    "TRABAJO EN CURSO": "Trabajo en curso",
-    "SUSPENDIDO": "Suspendido",
-    "READY": "Ready",
-    "WORK IN PROGRESS": "Work in progress",
-    "PREPARADO": "Preparado",
-    "ASIGNADO": "Asignado",
-    "PENDIENTE": "Pendiente",
-    "PENDING": "Pending",
-    "CATEGORIZADO": "Categorizado",
-}
-
-# Columnas del resultado gerencial.
-COL_DIAS_ABIERTO = "DIAS_ABIERTO"
-COL_ESTADO_ETIQUETA = "ESTADO_ETIQUETA"
 
 
-def _etiqueta_estado(valor) -> str:
-    """Nombre presentable del estado, con respaldo al valor original."""
-    clave = normalizar(valor)
-    return ETIQUETA_ESTADO.get(clave, str(valor).strip() or "Sin estado")
 
 
-def meses_del_plan(cosecha: pd.DataFrame, columna: str = "APERTURA") -> list[pd.Period]:
-    """Meses presentes en los datos, en orden. Evita fijar agosto/septiembre."""
-    if cosecha.empty or columna not in cosecha.columns:
-        return []
-    periodos = cosecha[columna].dropna().dt.to_period("M").unique()
-    return sorted(periodos)
 
+# ---------------------------------------------------------------------------
+# Casos_Ven
+# ---------------------------------------------------------------------------
 
-# Cache de la lectura del Plan de Trabajo (ver _cosecha_cacheada).
-_CACHE_COSECHA: dict[str, tuple[pd.DataFrame, dict]] = {}
-_CACHE_MAX = 2
-_CACHE_LOCK = threading.Lock()
-
-
-def _cosecha_cacheada(datos: bytes) -> tuple[pd.DataFrame, dict]:
-    """
-    Devuelve ``(cosecha, modelos)`` reutilizando el trabajo ya hecho.
-
-    Lee las hojas diarias y calibra el modelo de IDs una sola vez por contenido
-    de archivo. Sin esto, cada cambio de corte en el tablero obligaba a leer de
-    nuevo el xlsx completo (20 hojas) y recalibrar el modelo.
-
-    La clave es el sha1 del contenido, no la ruta: asi se reutiliza aunque el
-    archivo se suba de nuevo con otro nombre.
-    """
-    clave = hashlib.sha1(datos).hexdigest()
-    with _CACHE_LOCK:
-        guardado = _CACHE_COSECHA.get(clave)
-    if guardado is not None:
-        return guardado
-
-    info = reconocer_tipo(datos)
-    hojas = hojas_diarias(info["hojas"])
-    if not hojas:
-        raise ErrorPlan(
-            "El archivo no tiene hojas diarias (se esperaban nombres como "
-            "'22_Septiembre'). Hojas encontradas: "
-            + ", ".join(map(str, info["hojas"][:8]))
-        )
-
-    # El anio no viene en el nombre de la hoja ("22_Septiembre"): se prueba con
-    # el valor por defecto y, si las fechas del diario dicen otro, se rehace.
-    cosecha = leer_cosecha_diaria(datos, ANIO_DEFECTO)
-    anio = _inferir_anio_de_diario(cosecha)
-    if anio != ANIO_DEFECTO:
-        cosecha = leer_cosecha_diaria(datos, anio)
-
-    # Fecha de apertura corregida con el modelo de IDs (mes/dia invertidos).
-    modelos = modelo_ids_a_fecha(cosecha)
-    cosecha["APERTURA"] = corregir_fechas(
-        cosecha.assign(**{COL_CASO: cosecha[COL_ID_DIARIO]}),
-        COL_APERTURA,
-        modelos,
-        columna_id=COL_CASO,
-    )
-    cosecha["APERTURA_NATIVA"] = pd.to_datetime(
-        cosecha[COL_APERTURA], errors="coerce"
-    )
-    cosecha["APERTURA_CORREGIDA"] = cosecha["APERTURA"] != cosecha["APERTURA_NATIVA"]
-
-    resultado = (cosecha, modelos)
-    with _CACHE_LOCK:
-        # Se limita el tamano para no crecer sin control si se suben muchos
-        # archivos distintos en una misma sesion.
-        if len(_CACHE_COSECHA) >= _CACHE_MAX:
-            _CACHE_COSECHA.clear()
-        _CACHE_COSECHA[clave] = resultado
-    return resultado
-
-
-def vista_gerencial(
-    archivo: str | bytes,
-    *,
-    corte: pd.Timestamp | str | None = None,
-    estados: tuple[str, ...] = ESTADOS_EN_CURSO,
-    desde: pd.Timestamp | str | None = None,
-    hasta: pd.Timestamp | str | None = None,
-) -> dict:
-    """
-    Arma los datos del tablero gerencial de casos en curso.
-
-    Parametros
-    ----------
-    corte : fecha de corte. Si es ``None`` se usa la ultima hoja disponible.
-    estados : estados que cuentan como "en curso". El valor por defecto
-        (``ESTADOS_EN_CURSO``) es el que excluye Suspendido, Ready y
-        Work In Progress.
-    desde, hasta : rango del eje temporal. Si son ``None`` se usa desde la
-        apertura mas antigua hasta el corte.
-
-    Devuelve un diccionario con:
-
-      ``casos``      una fila por caso en curso, con la fecha de apertura ya
-                     corregida, los dias abiertos y la etiqueta de estado.
-      ``total``      numero de casos en curso en el corte.
-      ``por_mes``    lista de ``{"mes", "etiqueta", "casos"}``.
-      ``por_semana`` lista de ``{"semana", "etiqueta", "desde", "casos"}``.
-      ``por_dia``    lista de ``{"fecha", "etiqueta", "casos"}``.
-      ``por_tecnico``lista de ``{"usuario", "region", "casos"}``, de mayor a menor.
-      ``mas_antiguos``los 10 casos con mas dias abiertos.
-      ``por_estado`` lista de ``{"estado", "casos"}``.
-      ``por_region`` lista de ``{"region", "casos"}``.
-      ``pivote``     tabla usuario x dia, como la del correo.
-      ``totales_dia``fila de totales por dia.
-      ``conciliacion`` dict con el desglose de por que el total es ese.
-      ``meta``       corte, rango, estados y cifras de la lectura.
-    """
-    # Se lee una sola vez: evita abrir el xlsx varias veces.
-    if isinstance(archivo, (bytes, bytearray)):
-        datos = bytes(archivo)
-    else:
-        with open(archivo, "rb") as fh:
-            datos = fh.read()
-
-    # Lectura + modelo de fechas, reutilizados entre llamadas (ver la funcion).
-    cosecha, modelos = _cosecha_cacheada(datos)
-
-    # Las hojas disponibles salen de la propia cosecha ya leida.
-    hojas = (
-        cosecha.groupby("HOJA")["FECHA_HOJA"].first().to_dict()
-        if not cosecha.empty else {}
-    )
-
-    # --- corte ------------------------------------------------------------
-    # ``MODO_TODOS`` no es una fecha: devuelve el acumulado del periodo.
-    acumulado = isinstance(corte, str) and corte.strip().lower() == MODO_TODOS
-
-    hojas_ordenadas = sorted(hojas.items(), key=lambda kv: kv[1])
-    ultima_hoja, fecha_ultima = hojas_ordenadas[-1]
-    if corte is None or acumulado:
-        corte_ts = fecha_ultima + pd.Timedelta(hours=23, minutes=59)
-    else:
-        corte_ts = pd.Timestamp(corte)
-        if corte_ts.hour == 0 and corte_ts.minute == 0:
-            corte_ts = corte_ts + pd.Timedelta(hours=23, minutes=59)
-    hoja_corte = hojas_ordenadas[-1][0]
-    for nombre, fecha in hojas_ordenadas:
-        if fecha <= corte_ts:
-            hoja_corte = nombre
-
-    # Hojas que entran en el calculo
-    if acumulado:
-        seleccion = cosecha[
-            cosecha["FECHA_HOJA"] <= (corte_ts - pd.Timedelta(hours=23, minutes=59))
-        ].copy()
-        # Un caso puede aparecer en varias hojas: se conserva el ultimo estado
-        # de cada uno, para no contarlo dos veces.
-        seleccion = (
-            seleccion.sort_values("FECHA_HOJA")
-            .drop_duplicates(subset=[COL_ID_DIARIO], keep="last")
-        )
-        del_corte = seleccion
-        hoja_corte = "todas las hojas"
-    else:
-        del_corte = cosecha[cosecha["HOJA"] == hoja_corte].copy()
-
-    del_corte[COL_ESTADO_DIARIO] = del_corte[COL_ESTADO_DIARIO].map(
-        lambda v: normalizar(v) if pd.notna(v) else ""
-    )
-
-    estados_norm = tuple(normalizar(e) for e in estados)
-    en_curso = del_corte[del_corte[COL_ESTADO_DIARIO].isin(estados_norm)].copy()
-
-    en_curso[COL_ESTADO_ETIQUETA] = en_curso[COL_ESTADO_DIARIO].map(_etiqueta_estado)
-    en_curso[COL_DIAS_ABIERTO] = (
-        corte_ts - en_curso["APERTURA"]
-    ).dt.total_seconds() / 86400
-    en_curso[COL_ASIGNATARIO] = (
-        en_curso[COL_ASIGNATARIO].astype(str).str.strip().replace({"nan": ""})
-    )
-    en_curso["USUARIO"] = en_curso[COL_ASIGNATARIO].replace({"": "SIN ASIGNAR"})
-
-    # Zona: el campo ATIENDE de la hoja diaria distingue Bogota de regional.
-    if COL_ATIENDE in en_curso.columns:
-        atiende = en_curso[COL_ATIENDE].astype(str).str.strip()
-        en_curso["REGION"] = atiende.map(
-            lambda v: "Bogotá" if normalizar(v) == "BOGOTA" else
-            ("Regional" if normalizar(v) else "Sin dato")
-        )
-    else:
-        en_curso["REGION"] = "Sin dato"
-
-    # --- rango del eje ----------------------------------------------------
-    ap_validas = en_curso["APERTURA"].dropna()
-    if desde is None:
-        desde_ts = ap_validas.min() if len(ap_validas) else corte_ts
-    else:
-        desde_ts = pd.Timestamp(desde)
-    if hasta is None:
-        hasta_ts = corte_ts
-    else:
-        hasta_ts = pd.Timestamp(hasta)
-
-    # --- agregaciones -----------------------------------------------------
-    por_mes = []
-    if len(ap_validas):
-        for periodo, grupo in en_curso.groupby(en_curso["APERTURA"].dt.to_period("M")):
-            por_mes.append({
-                "mes": str(periodo),
-                "etiqueta": _ETIQUETA_MES.get(periodo.month, str(periodo.month)),
-                "casos": int(len(grupo)),
-            })
-
-    por_semana = []
-    if len(ap_validas):
-        iso = en_curso["APERTURA"].dt.isocalendar()
-        etiqueta_semana = (
-            iso["year"].astype(str) + "-W" + iso["week"].astype(str).str.zfill(2)
-        )
-        for clave, grupo in en_curso.groupby(etiqueta_semana):
-            fechas = grupo["APERTURA"].dropna()
-            por_semana.append({
-                "semana": clave,
-                "etiqueta": f"Semana {clave.split('-W')[1]}",
-                "desde": fechas.min(),
-                "casos": int(len(grupo)),
-            })
-        por_semana.sort(key=lambda d: d["desde"])
-
-    por_dia = []
-    for fecha, grupo in en_curso.dropna(subset=["APERTURA"]).groupby(
-        en_curso["APERTURA"].dt.normalize()
-    ):
-        por_dia.append({
-            "fecha": fecha,
-            "etiqueta": fecha.strftime("%d-%b"),
-            "casos": int(len(grupo)),
-        })
-    por_dia.sort(key=lambda d: d["fecha"])
-
-    por_tecnico = (
-        en_curso.groupby(["USUARIO", "REGION"])[COL_ID_DIARIO]
-        .count()
-        .reset_index(name="casos")
-        .sort_values("casos", ascending=False)
-    )
-    lista_tecnico = [
-        {"usuario": r["USUARIO"], "region": r["REGION"], "casos": int(r["casos"])}
-        for _, r in por_tecnico.iterrows()
-    ]
-
-    por_estado = [
-        {"estado": _etiqueta_estado(k), "casos": int(v)}
-        for k, v in del_corte[COL_ESTADO_DIARIO].value_counts().items()
-    ]
-
-    por_region = [
-        {"region": str(k), "casos": int(v)}
-        for k, v in en_curso["REGION"].value_counts().items()
-    ]
-
-    mas_antiguos = en_curso.sort_values(COL_DIAS_ABIERTO, ascending=False).head(10)
-
-    # --- pivote usuario x dia (como la tabla del correo) ------------------
-    pivote = pd.DataFrame()
-    totales_dia = pd.DataFrame()
-    if len(ap_validas):
-        base = en_curso.dropna(subset=["APERTURA"]).copy()
-        base["DIA"] = base["APERTURA"].dt.normalize()
-        pivote = pd.pivot_table(
-            base, index="USUARIO", columns="DIA", values=COL_ID_DIARIO,
-            aggfunc="count", fill_value=0,
-        )
-        pivote["Total general"] = pivote.sum(axis=1)
-        pivote = pivote.sort_values("Total general", ascending=False)
-        fila_total = pivote.sum(axis=0).to_frame().T
-        fila_total.index = ["Total general"]
-        totales_dia = fila_total
-
-    conciliacion = {
-        "hoja_corte": hoja_corte,
-        "leidos_hoja": int(len(del_corte)),
-        "excluidos": [
-            {"estado": _etiqueta_estado(k), "casos": int(v)}
-            for k, v in del_corte[COL_ESTADO_DIARIO].value_counts().items()
-            if k not in estados_norm
-        ],
-        "en_curso": int(len(en_curso)),
-        "sin_fecha": int(en_curso["APERTURA"].isna().sum()),
-        "fechas_corregidas": int(en_curso["APERTURA_CORREGIDA"].sum()),
-    }
-
-    return {
-        "casos": en_curso,
-        "total": int(len(en_curso)),
-        "por_mes": por_mes,
-        "por_semana": por_semana,
-        "por_dia": por_dia,
-        "por_tecnico": lista_tecnico,
-        "mas_antiguos": mas_antiguos,
-        "por_estado": por_estado,
-        "por_region": por_region,
-        "pivote": pivote,
-        "totales_dia": totales_dia,
-        "conciliacion": conciliacion,
-        "meta": {
-            "corte": corte_ts,
-            "hoja_corte": hoja_corte,
-            "acumulado": bool(acumulado),
-            "desde": desde_ts,
-            "hasta": hasta_ts,
-            "estados": [normalizar(e) for e in estados],
-            "tecnicos": int(en_curso["USUARIO"].nunique()),
-            "corregidas_totales": int(cosecha["APERTURA_CORREGIDA"].sum()),
-            "hojas": len(hojas),
-        },
-    }
-
-
+# Nombres de mes para las etiquetas de la interfaz y los informes.
 _ETIQUETA_MES = {
     1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio",
     7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre",
     12: "Diciembre",
 }
 
-
-def _inferir_anio_de_diario(cosecha: pd.DataFrame) -> int:
-    """
-    Deduce el anio del plan a partir de las fechas del diario.
-
-    Se aceptan dos senales, en este orden: un anio de 4 digitos en el texto de
-    la fecha, o el anio de una fecha nativa. Se toma el mas frecuente, que es
-    robusto frente a celdas sueltas mal formadas.
-    """
-    if cosecha.empty:
-        return ANIO_DEFECTO
-    anios = []
-    for valor in cosecha[COL_APERTURA].dropna():
-        if isinstance(valor, pd.Timestamp):
-            anios.append(valor.year)
-            continue
-        for texto in PATRON_ANIO.findall(str(valor)):
-            anio = int(texto)
-            if 2000 <= anio <= 2100:
-                anios.append(anio)
-    if not anios:
-        return ANIO_DEFECTO
-    return int(pd.Series(anios).mode().iloc[0])
-
-
-def resumen_para_correo(vista: dict) -> str:
-    """
-    Texto listo para pegar en el correo, con el formato que ya se usa.
-
-    No incluye nada que no salga de los datos: si un mes tiene 0 casos no
-    aparece, y la lista de meses se arma sola.
-    """
-    meta = vista["meta"]
-    corte_txt = meta["corte"].strftime("%d de %B").replace(
-        "January", "enero").replace("February", "febrero").replace(
-        "March", "marzo").replace("April", "abril").replace("May", "mayo").replace(
-        "June", "junio").replace("July", "julio").replace("August", "agosto").replace(
-        "September", "septiembre").replace("October", "octubre").replace(
-        "November", "noviembre").replace("December", "diciembre")
-
-    acumulado = bool(vista["meta"].get("acumulado"))
-    partes = [
-        "Se adjunta la evidencia consolidada del total de casos por técnico "
-        f"regional, con corte de {corte_txt}.",
-        "",
-        (
-            f"Total de casos atendidos en el período: {vista['total']} casos"
-            if acumulado
-            else f"Total de casos en curso en toda la operación: {vista['total']} casos"
-        ),
-    ]
-    if vista["por_mes"]:
-        desglose = " | ".join(
-            f"{m['etiqueta']}: {m['casos']}" for m in vista["por_mes"]
-        )
-        partes.append(desglose)
-    partes.append(f"Técnicos con casos activos: {meta['tecnicos']}")
-    return "\n".join(partes)
-
-# ===========================================================================
-# CASOS_VEN — listado completo de casos vencidos
-# ===========================================================================
-#
-# La hoja Casos_Ven es el HISTORICO de casos vencidos del mes: incluye tanto los
-# que siguen abiertos como los que ya se cerraron. Es una poblacion distinta de
-# las hojas diarias, que son la foto de los casos EN CURSO de un dia.
-#
-# Aqui se muestra completa, con su detalle caso a caso y sus totales.
-
-COL_FECHA_CORREGIDA = "FECHA_CORREGIDA"
 COL_MES_CREACION = "MES_CREACION"
 COL_ANO_MES = "ANO_MES"
+COL_DIAS_ABIERTO = "DIAS_ABIERTO"
+COL_FECHA_CORREGIDA = "FECHA_CORREGIDA"
 
 # Variantes de CULPA que son errores de digitacion y se agrupan.
 NORMALIZAR_CULPA_VEN = {
@@ -1204,8 +769,26 @@ def vista_vencidos(
         if columna not in casos.columns:
             return []
         serie = casos[columna].replace({"": "(sin dato)"})
-        conteo = serie.value_counts()
-        return [{etiqueta: str(k), "casos": int(v)} for k, v in conteo.items()]
+        # Los nombres vienen escritos de formas distintas ("caRLOS JIMENEZ" y
+        # "CARLOS JIMENEZ"). Se unifican para no mostrar al mismo tecnico dos
+        # veces, conservando la grafia mas frecuente.
+        acumulado: dict = {}
+        for valor in serie:
+            clave = normalizar(valor)
+            if not clave:
+                continue
+            entrada = acumulado.setdefault(clave, {"grafias": {}, "casos": 0})
+            entrada["casos"] += 1
+            original = str(valor).strip()
+            entrada["grafias"][original] = entrada["grafias"].get(original, 0) + 1
+        filas = []
+        for clave, datos in acumulado.items():
+            grafia = sorted(
+                datos["grafias"].items(),
+                key=lambda kv: (-kv[1], -sum(1 for c in kv[0] if c.isupper())),
+            )[0][0]
+            filas.append({etiqueta: grafia, "casos": int(datos["casos"])})
+        return sorted(filas, key=lambda f: -f["casos"])
 
     conciliacion = {
         "filas_leidas": int(filas_leidas),

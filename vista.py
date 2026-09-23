@@ -551,7 +551,7 @@ def lista_accion(
                 # Popover emergente directo en la fila
                 with st.popover(
                     "📨 Avisar",
-                    use_container_width=True,
+                    width="stretch",
                     help=f"Generar aviso inmediato para {tecnico}",
                 ):
                     st.markdown(f"### 📨 Notificación para {tecnico}")
@@ -581,7 +581,7 @@ def lista_accion(
                         if st.button(
                             "✅ Marcar WhatsApp",
                             key=f"{clave}_pop_wa_{i}",
-                            use_container_width=True,
+                            width="stretch",
                         ):
                             if historial is not None and not df_tec.empty:
                                 for _, f_tec in df_tec.iterrows():
@@ -604,7 +604,7 @@ def lista_accion(
                             if st.button(
                                 "🚀 Enviar Telegram",
                                 key=f"{clave}_pop_tg_{i}",
-                                use_container_width=True,
+                                width="stretch",
                                 type="primary",
                             ):
                                 ok = telegram_notifier.enviar_a_todos(texto_tg, parse_mode="HTML")
@@ -640,7 +640,7 @@ def lista_accion(
             if st.button(
                 f"➕ Ver {min(limite, faltan)} más",
                 key=f"{clave}_vermas",
-                use_container_width=True,
+                width="stretch",
             ):
                 st.session_state[clave_vista] = visibles + limite
                 st.rerun()
@@ -648,7 +648,7 @@ def lista_accion(
             st.button(
                 "✅ Lista completa",
                 key=f"{clave}_completa",
-                use_container_width=True,
+                width="stretch",
                 disabled=True,
             )
 
@@ -656,7 +656,7 @@ def lista_accion(
         if st.button(
             f"🔎 Ver los {n_total} en el Explorador",
             key=f"{clave}_ir_explorador",
-            use_container_width=True,
+            width="stretch",
             help="Abre la pestaña Explorador de Casos con este mismo conjunto.",
         ):
             # Se guarda la lista para que el Explorador la muestre tal cual.
@@ -673,7 +673,7 @@ def lista_accion(
             file_name=f"{_nombre_archivo(titulo)}_{datetime.now():%Y%m%d_%H%M}.csv",
             mime="text/csv",
             key=f"{clave}_csv",
-            use_container_width=True,
+            width="stretch",
         )
 
     st.caption(

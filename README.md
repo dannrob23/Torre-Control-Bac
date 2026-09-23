@@ -155,6 +155,11 @@ información detallada del caso seleccionado.
    - Gráfico de carga por técnico (top 15)
    - Botón para descargar CSV
 
+El dashboard tiene seis pestañas: **🎯 Despacho Operativo**, **📋 Explorador de
+Casos & SLA**, **📊 Analítica & Técnicos**, **📜 Historial & Auditoría**,
+**🗂️ Plan de Trabajo & ANS** y **🔍 Integridad de datos**. La quinta trabaja
+sobre el Plan de Trabajo mensual — ver [Plan de Trabajo y ANS](#plan-de-trabajo-y-ans-planpy).
+
 ---
 
 ### Notificaciones (`alertas_windows.py`)
@@ -259,6 +264,8 @@ Torre-Control-Bac/
 ├── README.md               # Este archivo
 ├── requirements.txt        # Dependencias Python
 ├── core.py                 # Lógica central (lectura, SLA, regiones)
+├── plan.py                 # Analítica del Plan de Trabajo (ANS, envejecimiento)
+├── crear_plantilla_plan.py # Agrega ESTADO y FECHA DE CIERRE al Plan de Trabajo
 ├── alertas_windows.py      # Notificaciones de escritorio
 ├── app_gui.py              # Interfaz gráfica de escritorio (Tkinter)
 ├── dashboard.py            # Dashboard web (Streamlit)
@@ -274,12 +281,76 @@ Torre-Control-Bac/
 
 ---
 
+### Plan de Trabajo y ANS (`plan.py`)
+
+La pestaña **🗂️ Plan de Trabajo & ANS** del dashboard analiza el archivo mensual
+del Plan de Trabajo (hoja `Casos_Ven`), que es distinto de la plantilla SLA.
+Responde otra pregunta: no *qué se vence ahora*, sino *cómo está envejeciendo la
+cartera y quién la acumula*.
+
+Sube el archivo desde la barra lateral (**🗂️ Cargar Plan de Trabajo**) y
+obtendrás:
+
+| Bloque | Qué responde |
+|---|---|
+| 🔴 ANS | Días vencidos por caso y por técnico, con tramos 1-7 / 8-30 / 31-90 / >90 |
+| ⏱️ Envejecimiento | Días abierto desde la creación, con tramos ≤7 / 8-15 / 16-30 / >30 |
+| 👷 Por técnico | Volumen **y** gravedad de la cartera de cada uno |
+| 🚧 Culpa | Distribución y % de vencimiento evitable (técnico + logístico) |
+| ⏱️ Velocidad de cierre | Tiempo de cierre y cumplimiento del ANS (requiere dos columnas) |
+| 📋 Calidad de datos | Fechas invertidas, duplicados, filas desalineadas |
+
+#### ⚠️ Las fechas de `Casos_Ven` vienen invertidas
+
+Excel convirtió los textos colombianos `DD/MM/AAAA` a fecha nativa aplicando el
+formato `m/d/yy`, así que **cuando el día era ≤ 12 mes y día quedaron
+intercambiados** (el 1 de septiembre se guardó como 9 de enero). El problema es
+que `09/01/2026` es ambiguo: no se puede saber mirando la celda.
+
+`plan.py` lo resuelve con la **secuencia de IDs de caso**, que es monótona (el ID
+máximo de cada hoja diaria crece ~100 por día). Cada fecha se contrasta contra
+ese modelo y solo se invierte si así queda más cerca. Medido sobre septiembre
+2026: la lectura día/mes da 3.6 días de error medio frente a 75.7 de la lectura
+mes/día.
+
+Sin esta corrección la antigüedad promedio sale **~4x inflada** (83 días en lugar
+de 22). Si una fecha no tiene referencia, **se conserva tal cual: no se adivina**.
+
+#### ⏱️ Activar la velocidad de cierre
+
+`Casos_Ven` no trae estado ni fecha de cierre, así que la velocidad de cierre no
+es medible con el archivo tal como viene. No se deduce de las hojas diarias a
+propósito: un caso abierto y uno cerrado desaparecen igual y no son
+distinguibles.
+
+Para activarla, ejecuta una vez:
+
+```powershell
+python crear_plantilla_plan.py "C:\ruta\Septiembre_2026_Plan de Trabajo.xlsx"
+```
+
+Genera una copia `..._con_estado.xlsx` con dos columnas nuevas (el original no se
+toca):
+
+- **`ESTADO`** — con lista desplegable (`ABIERTO`, `EN CURSO`, `CERRADO A
+  TIEMPOS`, `CERRADO TARDE`, …) para evitar las variantes escritas a mano que hoy
+  tienen las hojas diarias.
+- **`FECHA DE CIERRE`** — con formato `DD/MM/YYYY` para que Excel no la vuelva a
+  invertir.
+
+Quedan **vacías a propósito**. Al llenarlas, el tablero calcula tiempo de cierre,
+cumplimiento del ANS, días de desviación y backlog real automáticamente.
+
+---
+
 ## 📄 Origen de datos
 
 - **Archivo:** `PLANTILLA DE SEGUIMIENTO DE CASOS SEPTIEMBRE.xlsx`
 - **Hoja:** `PLANTILLA`
 - El archivo se autodescubre por patrón (`*SEGUIMIENTO*CASOS*.xlsx`) o se
   indica con `--excel "ruta\archivo.xlsx"` o la variable de entorno `TORRE_EXCEL`.
+- **Plan de Trabajo (ANEXO):** `*Plan de Trabajo*.xlsx`, hoja `Casos_Ven`. Se sube
+  desde la pestaña 🗂️ y usa `plan.py`; es un módulo independiente del núcleo SLA.
 
 ---
 

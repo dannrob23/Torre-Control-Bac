@@ -348,7 +348,7 @@ def exigir_login() -> dict:
         authenticator.logout(
             button_name="🚪 Cerrar sesión",
             location="sidebar",
-            use_container_width=True,
+            width="stretch",
             key="logout_torre_control",
         )
 

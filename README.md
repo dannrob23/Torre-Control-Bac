@@ -143,6 +143,11 @@ información detallada del caso seleccionado.
 1. Ejecuta `streamlit run dashboard.py`
 2. Se abre automáticamente en tu navegador (puerto 8501)
 3. En la barra lateral:
+   - **📤 Cargar archivo** — Acepta **la plantilla de seguimiento o el Plan de
+     Trabajo**. El sistema reconoce cuál es por sus hojas y lo envía solo a la
+     pestaña que corresponde, así que no hay que recordar cuál subir en cada
+     casilla. Si el archivo no es ninguno de los dos, lo dice y muestra las
+     hojas que encontró.
    - **🔄 Recalcular ahora** — Fuerza el recálculo de datos
    - **Auto-actualizar cada 60 s** — Recarga automática
 4. Usa los filtros de la parte superior:
@@ -288,8 +293,8 @@ del Plan de Trabajo (hoja `Casos_Ven`), que es distinto de la plantilla SLA.
 Responde otra pregunta: no *qué se vence ahora*, sino *cómo está envejeciendo la
 cartera y quién la acumula*.
 
-Sube el archivo desde la barra lateral (**🗂️ Cargar Plan de Trabajo**) y
-obtendrás:
+Sube el archivo desde la barra lateral (**🗂️ Cargar Plan de Trabajo**, o el
+cargador principal: se reconoce y enruta solo) y obtendrás:
 
 | Bloque | Qué responde |
 |---|---|
@@ -340,6 +345,22 @@ toca):
 
 Quedan **vacías a propósito**. Al llenarlas, el tablero calcula tiempo de cierre,
 cumplimiento del ANS, días de desviación y backlog real automáticamente.
+
+#### 🔎 Reconocimiento automático del archivo
+
+El cargador **no exige saber qué archivo es**. Al subir un `.xlsx`, el sistema
+mira sus hojas y decide:
+
+| Hojas encontradas | Tipo | Qué hace |
+|---|---|---|
+| `PLANTILLA` (o `PLANTILLA …`) | Plantilla SLA | Carga el tablero de SLA |
+| `Casos_Ven` y/o hojas `N_Mes` | Plan de Trabajo | Lo envía a la pestaña 🗂️ |
+| Ninguna de las anteriores | Desconocido | Lo dice y lista las hojas que sí trae |
+
+Esto evita el error clásico de subir el Plan de Trabajo en la casilla de la
+plantilla y recibir un `ValueError: Worksheet named 'PLANTILLA' not found` de
+openpyxl, que no explica nada. Ahora el archivo se enruta solo y, si no hay
+plantilla SLA cargada, las pestañas de SLA avisan en vez de romperse.
 
 ---
 

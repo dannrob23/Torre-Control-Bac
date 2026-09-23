@@ -1289,7 +1289,23 @@ def render_plan_trabajo() -> None:
             key="uploader_plan",
         )
 
-    if subido is None:
+    # Si el archivo se subio en el cargador principal y resulto ser un Plan de
+    # Trabajo, ya esta en session_state: no hay que pedirlo dos veces.
+    if subido is not None:
+        contenido = subido.getvalue()
+        nombre_plan = subido.name
+    elif st.session_state.get("plan_bytes"):
+        contenido = st.session_state["plan_bytes"]
+        nombre_plan = st.session_state.get("plan_nombre", "Plan de Trabajo.xlsx")
+        st.success(
+            f"📄 Usando el Plan de Trabajo cargado arriba: `{nombre_plan}`",
+            icon="✅",
+        )
+    else:
+        contenido = None
+        nombre_plan = ""
+
+    if contenido is None:
         st.info(
             "**Suba el archivo del Plan de Trabajo** desde la barra lateral para "
             "ver los indicadores de envejecimiento y ANS."
@@ -1310,7 +1326,6 @@ def render_plan_trabajo() -> None:
         )
         return
 
-    contenido = subido.getvalue()
     import hashlib
 
     firma = int(hashlib.md5(contenido).hexdigest()[:8], 16)
@@ -1598,16 +1613,17 @@ def main() -> None:
     origen_subido = None
     with st.sidebar:
         st.divider()
-        st.subheader("📤 Cargar plantilla")
+        st.subheader("📤 Cargar archivo")
         st.caption(
-            "Suba el archivo Excel de seguimiento. Se procesa en memoria; "
-            "no se guarda en el servidor."
+            "Suba la **plantilla de seguimiento** o el **Plan de Trabajo**: el "
+            "sistema reconoce cuál es por sus hojas y lo envía a la pestaña "
+            "correcta. Se procesa en memoria; no se guarda en el servidor."
         )
         archivo_subido = st.file_uploader(
-            "Plantilla de casos (.xlsx)",
+            "Plantilla o Plan de Trabajo (.xlsx)",
             type=["xlsx"],
             key="uploader_plantilla",
-            help="Si no sube nada, se usa la plantilla que este junto al sistema.",
+            help="Si no sube nada, se usa la plantilla que esté junto al sistema.",
         )
         if archivo_subido is not None:
             origen_subido = archivo_subido
@@ -1618,48 +1634,82 @@ def main() -> None:
 
         firma = int(hashlib.md5(contenido).hexdigest()[:8], 16)
         ruta = f"(subido) {origen_subido.name}"
+
+        # Reconocimiento automatico: no se le exige al usuario saber cual subir.
+        tipo = plan.reconocer_tipo(contenido)
+        st.session_state["tipo_archivo"] = tipo["tipo"]
+        st.session_state["detalle_archivo"] = tipo["detalle"]
+
+        if tipo["tipo"] == plan.TIPO_PLAN:
+            # Es el Plan de Trabajo: se enruta a su pestana y se sigue usando la
+            # plantilla SLA que ya estuviera disponible, sin descartarla.
+            st.session_state["plan_bytes"] = contenido
+            st.session_state["plan_nombre"] = origen_subido.name
+            origen_subido = None
+        elif tipo["tipo"] == plan.TIPO_PLANTILLA:
+            # Es la plantilla SLA. Se limpia un Plan anterior para no mezclar
+            # dos archivos de meses distintos.
+            st.session_state.pop("plan_bytes", None)
+            st.session_state.pop("plan_nombre", None)
+
+    hay_plantilla = False
+    plantilla_error = None
+    if origen_subido is not None:
         lector = lambda: cargar_desde_bytes(
-            contenido, float(firma), momento.isoformat(), origen_subido.name
+            origen_subido.getvalue(), float(firma), momento.isoformat(), origen_subido.name
         )
+        hay_plantilla = True
     else:
         try:
             ruta = localizar_excel(os.environ.get("TORRE_EXCEL"))
         except ErrorLecturaExcel as exc:
-            st.error("❌ No se encontró la plantilla de seguimiento.")
-            st.info(
-                "**Suba el archivo Excel** desde la barra lateral, o colóquelo "
-                "junto al sistema."
-            )
-            st.code(str(exc))
-            st.stop()
-        lector = lambda: cargar(ruta, firma_archivo(ruta), momento.isoformat())
+            ruta = "(ninguna)"
+            lector = None
+            plantilla_error = exc
+        else:
+            lector = lambda: cargar(ruta, firma_archivo(ruta), momento.isoformat())
+            hay_plantilla = True
 
     # --- Lectura de Datos -------------------------------------------------
-    try:
-        with st.spinner("Leyendo la plantilla y calculando SLA..."):
-            devuelto = lector()
-            (df, df_completo, total_hoja, total_activos,
-             dias_ventana, avisos) = devuelto[:6]
-            # Los dos ultimos son opcionales (compatibilidad si alguna version
-            # de cargar() no los devuelve todavia)
-            df_crudo = devuelto[6] if len(devuelto) > 6 else None
-            nombre_archivo = devuelto[7] if len(devuelto) > 7 else "plantilla.xlsx"
-    except ErrorLecturaExcel as exc:
-        st.error("❌ No se pudo leer el archivo Excel.")
-        st.warning(
-            "Causa más frecuente: **el archivo está abierto en Excel por otro "
-            "usuario**. Ciérrelo y pulse *Recalcular ahora*."
-        )
-        st.code(str(exc))
-        st.stop()
-    except Exception as exc:
-        st.error("❌ No se pudo procesar el archivo.")
-        st.info(
-            "Verifique que sea la plantilla correcta y que la hoja se llame "
-            "**PLANTILLA**."
-        )
-        st.code(f"{type(exc).__name__}: {exc}")
-        st.stop()
+    df = pd.DataFrame()
+    df_completo = pd.DataFrame()
+    df_crudo = None
+    nombre_archivo = "plantilla.xlsx"
+    total_hoja = total_activos = 0
+    avisos = []
+
+    if hay_plantilla:
+        try:
+            with st.spinner("Leyendo la plantilla y calculando SLA..."):
+                devuelto = lector()
+                (df, df_completo, total_hoja, total_activos,
+                 dias_ventana, avisos) = devuelto[:6]
+                # Los dos ultimos son opcionales (compatibilidad si alguna version
+                # de cargar() no los devuelve todavia)
+                df_crudo = devuelto[6] if len(devuelto) > 6 else None
+                nombre_archivo = devuelto[7] if len(devuelto) > 7 else "plantilla.xlsx"
+        except ErrorLecturaExcel as exc:
+            st.error("❌ No se pudo leer el archivo Excel.")
+            st.warning(
+                "Causa más frecuente: **el archivo está abierto en Excel por otro "
+                "usuario**. Ciérrelo y pulse *Recalcular ahora*."
+            )
+            st.code(str(exc))
+            hay_plantilla = False
+        except Exception as exc:
+            st.error("❌ No se pudo procesar el archivo.")
+            tipo_info = plan.reconocer_tipo(
+                origen_subido.getvalue() if origen_subido is not None else ruta
+            )
+            st.info(
+                f"**Reconocimiento del archivo:** {tipo_info['detalle']}\n\n"
+                "Si es un **Plan de Trabajo**, ábralo en la pestaña "
+                "**🗂️ Plan de Trabajo & ANS** (se enruta solo desde el cargador). "
+                "Si es la **plantilla de seguimiento**, debe traer la hoja "
+                "`PLANTILLA`."
+            )
+            st.code(f"{type(exc).__name__}: {exc}")
+            hay_plantilla = False
 
     # --- Anonimización ----------------------------------------------------
     aviso_privacidad = anonimizar.aviso_para_la_interfaz()
@@ -1695,9 +1745,15 @@ def main() -> None:
     )
     total_completo = len(df_completo)
 
-    # Alcance de los avisos para la torre de control
+    # Alcance de los avisos para la torre de control.
+    # Si no hay plantilla valida (por ejemplo, se subio el Plan de Trabajo en su
+    # lugar) los DataFrame vienen vacios y sin columnas: sin este corte se
+    # accedia a df_completo["CERRADO"] y saltaba un KeyError.
     incluir_proximos = bool(st.session_state.get("notif_incluir_proximos", True))
-    if incluir_proximos:
+    if df_completo.empty:
+        conjunto_notificar = pd.DataFrame(columns=["TECNICO", "ESTADO", "CERRADO"])
+        estados_notificar = ESTADOS_ALERTA
+    elif incluir_proximos:
         estados_notificar = (ROJO, NARANJA, AMARILLO, VERDE)
         conjunto_notificar = df_completo[
             (~df_completo["CERRADO"])
@@ -1725,223 +1781,233 @@ def main() -> None:
         "🔍 Integridad de datos",
     ])
 
-    # ---------------------------------------------------------------------
-    # PESTAÑA 1: 🎯 DESPACHO OPERATIVO
-    # ---------------------------------------------------------------------
-    with tab_despacho:
-        control = vista.barra_control(df_completo, df, momento)
-        df_vista = control["datos"]
+    if hay_plantilla:
+        # ---------------------------------------------------------------------
+        # PESTAÑA 1: 🎯 DESPACHO OPERATIVO
+        # ---------------------------------------------------------------------
+        with tab_despacho:
+            control = vista.barra_control(df_completo, df, momento)
+            df_vista = control["datos"]
 
-        st.divider()
+            st.divider()
 
-        # Franja de Foco KPI Cards
-        listas = vista.construir_listas(df_completo, momento)
-        vista.franja_foco(
-            listas["n_vencidos"],
-            listas["n_vencen_hoy"],
-            listas["n_proximos_3d"],
-            total_completo,
-        )
+            # Franja de Foco KPI Cards
+            listas = vista.construir_listas(df_completo, momento)
+            vista.franja_foco(
+                listas["n_vencidos"],
+                listas["n_vencen_hoy"],
+                listas["n_proximos_3d"],
+                total_completo,
+            )
 
-        st.markdown("##### 🚦 Reparto del semáforo (todos los casos)")
-        vista.barra_semaforo(conteo_completo, total_completo)
+            st.markdown("##### 🚦 Reparto del semáforo (todos los casos)")
+            vista.barra_semaforo(conteo_completo, total_completo)
 
-        st.divider()
+            st.divider()
 
-        # Listas de acción priorizadas con popovers flotantes contextualmente
-        vista.lista_accion(
-            listas["vencen_hoy"],
-            "⏰ Vencen en las próximas 24 h — última oportunidad",
-            "Del más urgente al menos urgente. Todavía se pueden salvar. Presiona '📨 Avisar' para notificar inmediatamente.",
-            "✅ Ningún caso vence en las próximas 24 horas.",
-            "accion_hoy",
-            tecnicos_notificables=tecnicos_notificables,
-            df_completo=df_completo,
-            historial=historial,
-        )
-        st.divider()
-        vista.lista_accion(
-            listas["vencidos"],
-            "🚨 Ya vencidos — el más atrasado primero",
-            "Sin resolver desde hace más tiempo. Requieren acción inmediata.",
-            "✅ No hay casos vencidos sin cerrar.",
-            "accion_vencidos",
-            tecnicos_notificables=tecnicos_notificables,
-            df_completo=df_completo,
-            historial=historial,
-        )
+            # Listas de acción priorizadas con popovers flotantes contextualmente
+            vista.lista_accion(
+                listas["vencen_hoy"],
+                "⏰ Vencen en las próximas 24 h — última oportunidad",
+                "Del más urgente al menos urgente. Todavía se pueden salvar. Presiona '📨 Avisar' para notificar inmediatamente.",
+                "✅ Ningún caso vence en las próximas 24 horas.",
+                "accion_hoy",
+                tecnicos_notificables=tecnicos_notificables,
+                df_completo=df_completo,
+                historial=historial,
+            )
+            st.divider()
+            vista.lista_accion(
+                listas["vencidos"],
+                "🚨 Ya vencidos — el más atrasado primero",
+                "Sin resolver desde hace más tiempo. Requieren acción inmediata.",
+                "✅ No hay casos vencidos sin cerrar.",
+                "accion_vencidos",
+                tecnicos_notificables=tecnicos_notificables,
+                df_completo=df_completo,
+                historial=historial,
+            )
 
-    # ---------------------------------------------------------------------
-    # PESTAÑA 2: 📋 EXPLORADOR DE CASOS & SLA
-    # ---------------------------------------------------------------------
-    with tab_explorador:
-        # Recuperar df_vista o calcular si se cambia de pestaña
-        if "df_vista" not in locals():
-            df_vista = df_completo
+        # ---------------------------------------------------------------------
+        # PESTAÑA 2: 📋 EXPLORADOR DE CASOS & SLA
+        # ---------------------------------------------------------------------
+        with tab_explorador:
+            # Recuperar df_vista o calcular si se cambia de pestaña
+            if "df_vista" not in locals():
+                df_vista = df_completo
 
-        # --- Conjunto recibido desde una tarjeta de Despacho ----------------
-        # Los botones "Ver los N en el Explorador" dejan aqui la lista exacta,
-        # para que se vean JUSTO esos casos sin volver a filtrar a mano.
-        conjunto = st.session_state.get("set_explorador")
-        if conjunto is not None and not conjunto.empty:
-            origen = st.session_state.get("origen_explorador", "lista seleccionada")
-            av1, av2 = st.columns([5, 1.4])
-            with av1:
-                st.info(
-                    f"🎯 Mostrando el conjunto cargado desde **{origen}**: "
-                    f"**{len(conjunto)}** caso(s). Los filtros de abajo se aplican "
-                    "sobre este conjunto."
+            # --- Conjunto recibido desde una tarjeta de Despacho ----------------
+            # Los botones "Ver los N en el Explorador" dejan aqui la lista exacta,
+            # para que se vean JUSTO esos casos sin volver a filtrar a mano.
+            conjunto = st.session_state.get("set_explorador")
+            if conjunto is not None and not conjunto.empty:
+                origen = st.session_state.get("origen_explorador", "lista seleccionada")
+                av1, av2 = st.columns([5, 1.4])
+                with av1:
+                    st.info(
+                        f"🎯 Mostrando el conjunto cargado desde **{origen}**: "
+                        f"**{len(conjunto)}** caso(s). Los filtros de abajo se aplican "
+                        "sobre este conjunto."
+                    )
+                with av2:
+                    if st.button(
+                        "✖️ Quitar conjunto",
+                        key="quitar_conjunto_explorador",
+                        width="stretch",
+                        help="Volver a ver todos los casos del sistema.",
+                    ):
+                        st.session_state.pop("set_explorador", None)
+                        st.session_state.pop("origen_explorador", None)
+                        st.rerun()
+                df_vista = conjunto.copy()
+
+            st.subheader("🔎 Filtros avanzados de casos")
+            f1, f2, f3, f4 = st.columns([2, 2, 2, 2])
+
+            tecnicos = sorted(t for t in df_vista["TECNICO"].unique() if t)
+            regiones = sorted(df_vista["REGION_TECNICO"].unique())
+            estados = [e for e in sorted(df_vista["ESTADO"].unique(), key=lambda x: ORDEN_ESTADO[x])]
+
+            with f1:
+                sel_tecnicos = st.multiselect("👷 Técnico", tecnicos, placeholder="Todos los técnicos", key="exp_tecnicos")
+            with f2:
+                sel_regiones = st.multiselect("📍 Región", regiones, placeholder="Todas las regiones", key="exp_regiones")
+            with f3:
+                sel_estados = st.multiselect("🚦 Estado", estados, placeholder="Todos los estados", key="exp_estados")
+            with f4:
+                busqueda = st.text_input("🔍 Buscar caso / ciudad", placeholder="Ej: IM3237396", key="exp_busqueda")
+
+            filtrado = df_vista.copy()
+            if sel_tecnicos:
+                filtrado = filtrado[filtrado["TECNICO"].isin(sel_tecnicos)]
+            if sel_regiones:
+                filtrado = filtrado[filtrado["REGION_TECNICO"].isin(sel_regiones)]
+            if sel_estados:
+                filtrado = filtrado[filtrado["ESTADO"].isin(sel_estados)]
+            if busqueda.strip():
+                patron = busqueda.strip()
+                mascara = (
+                    filtrado[COL_CASO].astype(str).str.contains(patron, case=False, na=False)
+                    | filtrado[COL_CIUDAD].astype(str).str.contains(patron, case=False, na=False)
                 )
-            with av2:
-                if st.button(
-                    "✖️ Quitar conjunto",
-                    key="quitar_conjunto_explorador",
-                    width="stretch",
-                    help="Volver a ver todos los casos del sistema.",
-                ):
-                    st.session_state.pop("set_explorador", None)
-                    st.session_state.pop("origen_explorador", None)
-                    st.rerun()
-            df_vista = conjunto.copy()
+                filtrado = filtrado[mascara]
 
-        st.subheader("🔎 Filtros avanzados de casos")
-        f1, f2, f3, f4 = st.columns([2, 2, 2, 2])
+            if REGION_DESCONOCIDA in set(filtrado["REGION_TECNICO"]):
+                st.warning(
+                    f"Hay casos con técnico no registrado en el diccionario de regiones "
+                    f"({REGION_DESCONOCIDA}). Revise el mapeo en `core.py`."
+                )
 
-        tecnicos = sorted(t for t in df_vista["TECNICO"].unique() if t)
-        regiones = sorted(df_vista["REGION_TECNICO"].unique())
-        estados = [e for e in sorted(df_vista["ESTADO"].unique(), key=lambda x: ORDEN_ESTADO[x])]
+            st.markdown(f"#### 📋 Tabla de Casos ({len(filtrado)} de {len(df_vista)})")
 
-        with f1:
-            sel_tecnicos = st.multiselect("👷 Técnico", tecnicos, placeholder="Todos los técnicos", key="exp_tecnicos")
-        with f2:
-            sel_regiones = st.multiselect("📍 Región", regiones, placeholder="Todas las regiones", key="exp_regiones")
-        with f3:
-            sel_estados = st.multiselect("🚦 Estado", estados, placeholder="Todos los estados", key="exp_estados")
-        with f4:
-            busqueda = st.text_input("🔍 Buscar caso / ciudad", placeholder="Ej: IM3237396", key="exp_busqueda")
+            if filtrado.empty:
+                st.info("Ningún caso coincide con los filtros seleccionados.")
+            else:
+                visible = filtrado[list(COLUMNAS_TABLA)].rename(columns=COLUMNAS_TABLA)
+                venc = pd.to_datetime(visible["Vencimiento"], errors="coerce")
+                visible["Vencimiento"] = (
+                    venc.dt.strftime("%Y-%m-%d %H:%M").fillna("Sin fecha de vencimiento")
+                )
+                for col_txt in ("Ciudad", "Tecnico", "Caso", "Regional", "Departamento"):
+                    if col_txt in visible.columns:
+                        visible[col_txt] = visible[col_txt].astype(str)
 
-        filtrado = df_vista.copy()
-        if sel_tecnicos:
-            filtrado = filtrado[filtrado["TECNICO"].isin(sel_tecnicos)]
-        if sel_regiones:
-            filtrado = filtrado[filtrado["REGION_TECNICO"].isin(sel_regiones)]
-        if sel_estados:
-            filtrado = filtrado[filtrado["ESTADO"].isin(sel_estados)]
-        if busqueda.strip():
-            patron = busqueda.strip()
-            mascara = (
-                filtrado[COL_CASO].astype(str).str.contains(patron, case=False, na=False)
-                | filtrado[COL_CIUDAD].astype(str).str.contains(patron, case=False, na=False)
-            )
-            filtrado = filtrado[mascara]
-
-        if REGION_DESCONOCIDA in set(filtrado["REGION_TECNICO"]):
-            st.warning(
-                f"Hay casos con técnico no registrado en el diccionario de regiones "
-                f"({REGION_DESCONOCIDA}). Revise el mapeo en `core.py`."
-            )
-
-        st.markdown(f"#### 📋 Tabla de Casos ({len(filtrado)} de {len(df_vista)})")
-
-        if filtrado.empty:
-            st.info("Ningún caso coincide con los filtros seleccionados.")
-        else:
-            visible = filtrado[list(COLUMNAS_TABLA)].rename(columns=COLUMNAS_TABLA)
-            venc = pd.to_datetime(visible["Vencimiento"], errors="coerce")
-            visible["Vencimiento"] = (
-                venc.dt.strftime("%Y-%m-%d %H:%M").fillna("Sin fecha de vencimiento")
-            )
-            for col_txt in ("Ciudad", "Tecnico", "Caso", "Regional", "Departamento"):
-                if col_txt in visible.columns:
-                    visible[col_txt] = visible[col_txt].astype(str)
-
-            st.dataframe(
-                visible.style.apply(estilizar, axis=None).format(
-                    {"Horas restantes": "{:,.2f}"}, na_rep="—"
-                ),
-                width="stretch",
-                hide_index=True,
-                height=min(650, 40 + 35 * len(visible)),
-                column_config={
-                    "Horas restantes": st.column_config.NumberColumn(
-                        "Horas restantes", help="Negativo = vencido", format="%.2f"
-                    ),
-                    " ": st.column_config.TextColumn(" ", width="small"),
-                },
-            )
-
-            st.download_button(
-                "⬇️ Descargar casos filtrados (CSV)",
-                data=visible.to_csv(index=False).encode("utf-8-sig"),
-                file_name=f"casos_sla_{momento:%Y%m%d_%H%M}.csv",
-                mime="text/csv",
-                key="descarga_casos_tab",
-            )
-
-    # ---------------------------------------------------------------------
-    # PESTAÑA 3: 📊 ANALÍTICA & TÉCNICOS
-    # ---------------------------------------------------------------------
-    with tab_analitica:
-        st.subheader("📈 Análisis de Gestión y Distribución de Carga")
-        if "filtrado" not in locals():
-            filtrado = df_completo
-
-        # Gráficos de Altair con colores semánticos SLA
-        dibujar_graficos_altair(filtrado)
-
-        st.divider()
-
-        # Métricas de Gestión por Técnico (Rankings, Cumplimiento, Matriz)
-        st.subheader("🏆 Rankings de Gestión y Matriz de Cumplimiento")
-        render_metricas_por_tecnico(df_completo, momento)
-
-    # ---------------------------------------------------------------------
-    # PESTAÑA 4: 📜 HISTORIAL & AUDITORÍA
-    # ---------------------------------------------------------------------
-    with tab_historial:
-        st.subheader("🔔 Panel General de Notificaciones y Auditoría")
-
-        st.checkbox(
-            "Incluir también los próximos a vencer (no solo los vencidos y urgentes)",
-            value=True,
-            key="notif_incluir_proximos",
-            help="Marcado: incluye casos que aún no vencen. Desmarcado: solo alerta inmediata.",
-        )
-
-        tecnico_pedido = st.session_state.pop("tecnico_a_avisar", None)
-        if tecnico_pedido:
-            st.success(f"Técnico seleccionado desde la lista: **{tecnico_pedido}**", icon="👉")
-
-        render_notificaciones_pendientes(conjunto_notificar, historial, estados_notificar)
-
-        st.divider()
-
-        # Historial SQLite
-        st.subheader("🗂️ Registro de Auditoría (SQLite)")
-        if hist_error:
-            st.warning(f"No se pudo leer el historial de notificaciones: {hist_error}")
-        else:
-            k1, k2, k3, k4, k5 = st.columns(5)
-            k1.metric("🔔 Notificaciones", int(hist_resumen.get("total", 0)))
-            k2.metric("✅ Enviadas", int(hist_resumen.get("enviadas", 0)))
-            k3.metric("❌ Fallidas", int(hist_resumen.get("fallidas", 0)))
-            k4.metric("📄 Casos", int(hist_resumen.get("casos", 0)))
-            k5.metric("👷 Técnicos", int(hist_resumen.get("tecnicos", 0)))
-
-            if hist_detalle is not None and not hist_detalle.empty:
                 st.dataframe(
-                    hist_detalle.head(MAX_FILAS_DETALLE),
+                    visible.style.apply(estilizar, axis=None).format(
+                        {"Horas restantes": "{:,.2f}"}, na_rep="—"
+                    ),
                     width="stretch",
                     hide_index=True,
-                    height=min(450, 40 + 35 * len(hist_detalle)),
+                    height=min(650, 40 + 35 * len(visible)),
+                    column_config={
+                        "Horas restantes": st.column_config.NumberColumn(
+                            "Horas restantes", help="Negativo = vencido", format="%.2f"
+                        ),
+                        " ": st.column_config.TextColumn(" ", width="small"),
+                    },
                 )
+
                 st.download_button(
-                    "⬇️ Descargar Historial Completo (CSV)",
-                    data=hist_detalle.to_csv(index=False).encode("utf-8-sig"),
-                    file_name=f"historial_notificaciones_{momento:%Y%m%d_%H%M}.csv",
+                    "⬇️ Descargar casos filtrados (CSV)",
+                    data=visible.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"casos_sla_{momento:%Y%m%d_%H%M}.csv",
                     mime="text/csv",
-                    key="descarga_historial_tab",
+                    key="descarga_casos_tab",
                 )
+
+        # ---------------------------------------------------------------------
+        # PESTAÑA 3: 📊 ANALÍTICA & TÉCNICOS
+        # ---------------------------------------------------------------------
+        with tab_analitica:
+            st.subheader("📈 Análisis de Gestión y Distribución de Carga")
+            if "filtrado" not in locals():
+                filtrado = df_completo
+
+            # Gráficos de Altair con colores semánticos SLA
+            dibujar_graficos_altair(filtrado)
+
+            st.divider()
+
+            # Métricas de Gestión por Técnico (Rankings, Cumplimiento, Matriz)
+            st.subheader("🏆 Rankings de Gestión y Matriz de Cumplimiento")
+            render_metricas_por_tecnico(df_completo, momento)
+
+        # ---------------------------------------------------------------------
+        # PESTAÑA 4: 📜 HISTORIAL & AUDITORÍA
+        # ---------------------------------------------------------------------
+        with tab_historial:
+            st.subheader("🔔 Panel General de Notificaciones y Auditoría")
+
+            st.checkbox(
+                "Incluir también los próximos a vencer (no solo los vencidos y urgentes)",
+                value=True,
+                key="notif_incluir_proximos",
+                help="Marcado: incluye casos que aún no vencen. Desmarcado: solo alerta inmediata.",
+            )
+
+            tecnico_pedido = st.session_state.pop("tecnico_a_avisar", None)
+            if tecnico_pedido:
+                st.success(f"Técnico seleccionado desde la lista: **{tecnico_pedido}**", icon="👉")
+
+            render_notificaciones_pendientes(conjunto_notificar, historial, estados_notificar)
+
+            st.divider()
+
+            # Historial SQLite
+            st.subheader("🗂️ Registro de Auditoría (SQLite)")
+            if hist_error:
+                st.warning(f"No se pudo leer el historial de notificaciones: {hist_error}")
+            else:
+                k1, k2, k3, k4, k5 = st.columns(5)
+                k1.metric("🔔 Notificaciones", int(hist_resumen.get("total", 0)))
+                k2.metric("✅ Enviadas", int(hist_resumen.get("enviadas", 0)))
+                k3.metric("❌ Fallidas", int(hist_resumen.get("fallidas", 0)))
+                k4.metric("📄 Casos", int(hist_resumen.get("casos", 0)))
+                k5.metric("👷 Técnicos", int(hist_resumen.get("tecnicos", 0)))
+
+                if hist_detalle is not None and not hist_detalle.empty:
+                    st.dataframe(
+                        hist_detalle.head(MAX_FILAS_DETALLE),
+                        width="stretch",
+                        hide_index=True,
+                        height=min(450, 40 + 35 * len(hist_detalle)),
+                    )
+                    st.download_button(
+                        "⬇️ Descargar Historial Completo (CSV)",
+                        data=hist_detalle.to_csv(index=False).encode("utf-8-sig"),
+                        file_name=f"historial_notificaciones_{momento:%Y%m%d_%H%M}.csv",
+                        mime="text/csv",
+                        key="descarga_historial_tab",
+                    )
+
+    else:
+        st.info(
+            "**Falta la plantilla de seguimiento SLA.** Suba el archivo de seguimiento de casos (el que trae la hoja `PLANTILLA`) desde la barra lateral. Mientras tanto, la pestaña **🗂️ Plan de Trabajo & ANS** sí está disponible si cargó ese archivo.",
+            icon="📤",
+        )
+        if plantilla_error is not None:
+            st.caption("Detalle de la búsqueda automática:")
+            st.code(str(plantilla_error))
 
     # ---------------------------------------------------------------------
     # PESTANA 5: PLAN DE TRABAJO & ANS

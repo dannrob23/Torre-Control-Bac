@@ -251,6 +251,101 @@ def _nombres_hojas(archivo: str | bytes) -> list[str]:
         return list(libro.sheet_names)
 
 
+# ---------------------------------------------------------------------------
+# Reconocimiento automatico del tipo de archivo
+# ---------------------------------------------------------------------------
+
+# Nombre de la hoja de la plantilla SLA (core.py). Se repite aqui para no
+# depender de core al clasificar; si cambia alla, solo se degrada el mensaje.
+PATRON_HOJA_PLANTILLA = re.compile(r"^PLANTILLA", re.IGNORECASE)
+
+TIPO_PLANTILLA = "plantilla"
+TIPO_PLAN = "plan"
+TIPO_DESCONOCIDO = "desconocido"
+
+
+def hoja_para_plantilla(archivo: str | bytes) -> str | None:
+    """
+    Devuelve la hoja que parece la plantilla SLA, o ``None`` si no hay.
+
+    Acepta variantes tipo 'PLANTILLA ' o 'PLANTILLA SEPTIEMBRE' porque el
+    encabezado real trae espacios sobrantes.
+    """
+    try:
+        hojas = _nombres_hojas(archivo)
+    except Exception:
+        return None
+    return next((h for h in hojas if PATRON_HOJA_PLANTILLA.match(str(h).strip())), None)
+
+
+def reconocer_tipo(archivo: str | bytes) -> dict:
+    """
+    Reconoce que tipo de archivo es, mirando SOLO sus hojas.
+
+    En el sistema conviven dos archivos distintos y el usuario no tiene por que
+    recordar cual subir en cada casilla:
+
+      * ``plantilla``   -> trae la hoja ``PLANTILLA`` (seguimiento SLA).
+      * ``plan``        -> trae ``Casos_Ven`` y/o hojas diarias ``N_Mes``
+                           (Plan de Trabajo).
+      * ``desconocido`` -> ninguna de las anteriores.
+
+    Detectar el tipo permite enrutar el archivo a la seccion correcta y dar un
+    mensaje util ("esto es un Plan de Trabajo") en lugar de dejar que openpyxl
+    falle con un ValueError sobre una hoja que no existe.
+
+    Devuelve ``{"tipo", "hojas", "hoja_principal", "detalle"}``. No lanza
+    excepcion por contenido: si el archivo no se puede abrir, devuelve
+    ``desconocido`` con el motivo en ``detalle``.
+    """
+    try:
+        hojas = _nombres_hojas(archivo)
+    except Exception as exc:
+        return {
+            "tipo": TIPO_DESCONOCIDO,
+            "hojas": [],
+            "hoja_principal": None,
+            "detalle": f"No se pudo abrir el archivo: {type(exc).__name__}: {exc}",
+        }
+
+    hoja_plantilla = next((h for h in hojas if PATRON_HOJA_PLANTILLA.match(str(h).strip())), None)
+    if hoja_plantilla:
+        return {
+            "tipo": TIPO_PLANTILLA,
+            "hojas": hojas,
+            "hoja_principal": hoja_plantilla,
+            "detalle": f"Contiene la hoja '{hoja_plantilla}'.",
+        }
+
+    hoja_vencidos = next(
+        (h for h in hojas if normalizar(h) == normalizar(HOJA_VENCIDOS)), None
+    )
+    diarias = hojas_diarias(hojas)
+    if hoja_vencidos or diarias:
+        partes = []
+        if hoja_vencidos:
+            partes.append(f"la hoja '{hoja_vencidos}'")
+        if diarias:
+            partes.append(f"{len(diarias)} hojas diarias")
+        return {
+            "tipo": TIPO_PLAN,
+            "hojas": hojas,
+            "hoja_principal": hoja_vencidos,
+            "detalle": "Contiene " + " y ".join(partes) + ".",
+        }
+
+    return {
+        "tipo": TIPO_DESCONOCIDO,
+        "hojas": hojas,
+        "hoja_principal": None,
+        "detalle": (
+            "No trae la hoja 'PLANTILLA' ni 'Casos_Ven'. Hojas encontradas: "
+            + ", ".join(map(str, hojas[:8]))
+            + (" ..." if len(hojas) > 8 else "")
+        ),
+    }
+
+
 def leer_vencidos(archivo: str | bytes, hoja: str = HOJA_VENCIDOS) -> pd.DataFrame:
     """
     Lee la hoja de casos vencidos y deja las columnas con nombres canonicos.
@@ -684,7 +779,20 @@ def analizar(
         except ImportError:
             momento = pd.Timestamp.now()
 
-    crudo = leer_vencidos(archivo, hoja=hoja_vencidos)
+    # El tipo de archivo se reconoce solo: si lo que llega no es un Plan de
+    # Trabajo, se dice con claridad en vez de fallar buscando una hoja.
+    info = reconocer_tipo(archivo)
+    if info["tipo"] == TIPO_PLANTILLA:
+        raise ErrorPlan(
+            "Este archivo es la PLANTILLA de seguimiento SLA, no un Plan de "
+            f"Trabajo ({info['detalle']}). Subalo en 'Cargar plantilla', no en "
+            "'Cargar Plan de Trabajo'."
+        )
+    if info["tipo"] == TIPO_DESCONOCIDO:
+        raise ErrorPlan("El archivo no parece un Plan de Trabajo. " + info["detalle"])
+
+    hoja = hoja_vencidos or info["hoja_principal"] or HOJA_VENCIDOS
+    crudo = leer_vencidos(archivo, hoja=hoja)
     # El anio del plan se deduce del propio archivo: los nombres de hoja no lo
     # traen ("17_Septiembre") y no se quiere una constante que caduque.
     anio = inferir_anio(crudo)

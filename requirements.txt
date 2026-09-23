@@ -1,12 +1,11 @@
 # ---------------------------------------------------------------------------
 # Torre de Control SLA - Colsof / Banco Agrario
-# Dependencias del proyecto  (version 2)
+# Dependencias del proyecto
 #
-# Instalacion normal (con internet):
+# Instalacion local:
 #     python -m pip install -r requirements.txt
 #
-# Instalacion sin conexion (ver docs/TUTORIAL_INSTALACION.md):
-#     python -m pip install --no-index --find-links=wheels -r requirements.txt
+# En Streamlit Cloud se instalan solas al desplegar.
 # ---------------------------------------------------------------------------
 
 # --- NUCLEO: lectura del Excel y calculo de SLA (OBLIGATORIO) ---
@@ -16,14 +15,27 @@ openpyxl>=3.1,<4.0
 # --- TELEGRAM: notificaciones al grupo de la torre de control ---
 requests>=2.31
 
-# --- DASHBOARD WEB (opcional: solo si usa INICIAR_DASHBOARD.bat) ---
+# --- DASHBOARD WEB ---
 streamlit>=1.30
 
-# --- NOTIFICACIONES DE ESCRITORIO (opcional) ---
+# --- CONTROL DE ACCESO (OBLIGATORIO) ---
+# El tablero exige usuario y contrasena antes de mostrar nada (auth.py).
+# FALTABA en este archivo: la app funcionaba solo porque la libreria quedo
+# cacheada en Streamlit Cloud. En un despliegue limpio (o si se limpia la
+# cache) el arranque fallaba con ImportError y la app no abria.
+#
+# Se fija la version porque la API cambia entre versiones mayores.
+streamlit-authenticator==0.4.2
+
+# Dependencias de streamlit-authenticator. Se declaran de forma explicita
+# porque, al no estar pineadas por la libreria en todas sus versiones, un
+# redeploy podia resolver versiones incompatibles.
+bcrypt>=4.0
+PyJWT>=2.8
+toml>=0.10
+
+# --- NOTIFICACIONES DE ESCRITORIO (opcional, solo Windows) ---
 # Si no esta instalado (o falla), alertas_windows.py usa automaticamente un
-# respaldo con toasts nativos de Windows via PowerShell, sin dependencias extra.
+# respaldo con toasts nativos de Windows via PowerShell.
 # Descomente la linea siguiente si desea usar plyer:
 # plyer>=2.1
-
-# NOTA: la interfaz grafica de escritorio (app_gui.py) usa tkinter, incluido con
-# Python en Windows. NO requiere instalacion aparte.

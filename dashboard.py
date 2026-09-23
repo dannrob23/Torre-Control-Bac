@@ -54,6 +54,7 @@ from core import (
     ErrorLecturaExcel,
     ahora_colombia,
     calcular_tablero,
+    leer_casos,
     localizar_excel,
     metricas_por_tecnico,
 )
@@ -219,9 +220,14 @@ def cargar(ruta: str, firma: float, momento_iso: str):
     si el Excel cambia, o si el usuario pulsa "Recalcular", la cache se invalida.
 
     Devuelve la tupla:
-        (df_ventana, df_completo, total_hoja, total_activos, dias_ventana, avisos)
+        (df_ventana, df_completo, total_hoja, total_activos, dias_ventana,
+         avisos, df_crudo, nombre_archivo)
+
+    df_crudo son las filas TAL CUAL vienen del Excel: se devuelve para poder
+    auditar la integridad (que ninguna fila diligenciada se pierda al procesar).
     """
-    resultado = calcular_tablero(ruta, momento=datetime.fromisoformat(momento_iso))
+    df_crudo = leer_casos(ruta)
+    resultado = calcular_tablero(df_crudo=df_crudo, momento=datetime.fromisoformat(momento_iso))
     return (
         resultado.df,
         resultado.df_completo,
@@ -229,6 +235,8 @@ def cargar(ruta: str, firma: float, momento_iso: str):
         resultado.total_activos,
         resultado.dias_ventana,
         list(resultado.warnings),
+        df_crudo,
+        os.path.basename(ruta),
     )
 
 
@@ -262,6 +270,8 @@ def cargar_desde_bytes(contenido: bytes, firma: float, momento_iso: str,
         resultado.total_activos,
         resultado.dias_ventana,
         list(resultado.warnings),
+        df_crudo,
+        nombre,
     )
 
 
@@ -1028,6 +1038,170 @@ def estilizar(df_visible: pd.DataFrame) -> pd.DataFrame:
 # Interfaz
 # ---------------------------------------------------------------------------
 
+def auditar_integridad(df_crudo, df_completo, nombre_archivo: str = "") -> dict:
+    """
+    Comprueba que NINGUNA fila diligenciada se pierda entre el Excel y la app.
+
+    Es la verificacion que pide la torre: si la fuente trae 15 filas
+    diligenciadas, la app debe representar las 15.
+
+    Returns:
+        dict con conteos, la tabla de verificaciones y la lista de faltantes.
+    """
+    if df_crudo is None:
+        return {"disponible": False}
+
+    n_crudo = len(df_crudo)
+    n_procesado = len(df_completo) if df_completo is not None else 0
+
+    def _diligenciadas(df: pd.DataFrame) -> int:
+        """Filas con al menos caso o vencimiento: las que significan algo."""
+        if df is None or df.empty:
+            return 0
+        cols = [c for c in (COL_CASO, COL_VENCIMIENTO) if c in df.columns]
+        if not cols:
+            return len(df)
+        return int(df[cols].notna().any(axis=1).sum())
+
+    dil_crudo = _diligenciadas(df_crudo)
+    dil_proc = _diligenciadas(df_completo)
+
+    # --- Casos del Excel que no llegaron a la app -------------------------
+    faltantes: list[str] = []
+    if COL_CASO in df_crudo.columns and df_completo is not None and COL_CASO in df_completo.columns:
+        en_crudo = {
+            str(v).strip() for v in df_crudo[COL_CASO].dropna() if str(v).strip()
+        }
+        en_app = {
+            str(v).strip() for v in df_completo[COL_CASO].dropna() if str(v).strip()
+        }
+        faltantes = sorted(en_crudo - en_app)
+
+    # --- Completitud por columna -----------------------------------------
+    revisiones = [
+        ("Filas en la hoja Excel", n_crudo, "Todo lo que trae el archivo"),
+        ("Filas procesadas por la app", n_procesado, "Resultado del calculo de SLA"),
+        ("Filas diligenciadas (Excel)", dil_crudo, "Con caso o vencimiento"),
+        ("Filas diligenciadas (app)", dil_proc, "Representadas en pantalla"),
+    ]
+
+    columnas_revisadas = [
+        (COL_CASO, "N° de caso"),
+        ("TECNICO COLSOF ASIGNADO INICIALMENTE", "Técnico asignado"),
+        (COL_CIUDAD, "Oficina"),
+        (COL_REGIONAL, "Regional"),
+        (COL_DEPARTAMENTO, "Departamento"),
+        (COL_VENCIMIENTO, "Vencimiento"),
+        ("FECHA/ HORA QUE SE ATENDIO Y SE DIO POR RESUELTO", "Fecha de resolución"),
+    ]
+    completitud = []
+    for col, etiqueta in columnas_revisadas:
+        if col in df_crudo.columns:
+            llenas = int(df_crudo[col].notna().sum())
+            completitud.append({
+                "Campo": etiqueta,
+                "Diligenciadas": llenas,
+                "Vacías": n_crudo - llenas,
+                "% completo": round(llenas / n_crudo * 100, 1) if n_crudo else 0.0,
+            })
+
+    cuadra = (n_crudo == n_procesado) and (dil_crudo == dil_proc) and not faltantes
+
+    return {
+        "disponible": True,
+        "archivo": nombre_archivo,
+        "n_crudo": n_crudo,
+        "n_procesado": n_procesado,
+        "dil_crudo": dil_crudo,
+        "dil_procesado": dil_proc,
+        "revisiones": revisiones,
+        "completitud": pd.DataFrame(completitud),
+        "faltantes": faltantes,
+        "cuadra": cuadra,
+    }
+
+
+def render_integridad(df_crudo, df_completo, nombre_archivo: str = "") -> None:
+    """Dibuja el panel "Integridad de datos"."""
+    st.subheader("🔍 Integridad de datos")
+    st.caption(
+        "Verifica que todas las filas diligenciadas del Excel llegaron al tablero. "
+        "Si algo no cuadra, aparece aquí y en el Explorador."
+    )
+
+    info = auditar_integridad(df_crudo, df_completo, nombre_archivo)
+
+    if not info.get("disponible"):
+        st.warning(
+            "No se pudo auditar: esta versión de la carga no expone las filas "
+            "originales del Excel."
+        )
+        return
+
+    # --- Veredicto ---------------------------------------------------------
+    if info["cuadra"]:
+        st.success(
+            f"✅ **Cuadra**: {info['dil_procesado']} de {info['dil_crudo']} filas "
+            f"diligenciadas están representadas. Nada se perdió al procesar."
+        )
+    else:
+        st.error(
+            f"❌ **No cuadra**: el Excel trae {info['dil_crudo']} filas diligenciadas "
+            f"y la app representa {info['dil_procesado']}."
+        )
+
+    # --- Conteos -----------------------------------------------------------
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("📄 Filas en el Excel", info["n_crudo"])
+    c2.metric("⚙️ Procesadas por la app", info["n_procesado"],
+              delta=info["n_procesado"] - info["n_crudo"], delta_color="off")
+    c3.metric("✍️ Diligenciadas (Excel)", info["dil_crudo"])
+    c4.metric("👁️ Diligenciadas (app)", info["dil_procesado"],
+              delta=info["dil_procesado"] - info["dil_crudo"], delta_color="off")
+
+    # --- Tabla de verificaciones ------------------------------------------
+    st.markdown("##### Verificaciones")
+    st.dataframe(
+        pd.DataFrame(info["revisiones"], columns=["Verificación", "Cantidad", "Qué mide"]),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    # --- Casos faltantes ---------------------------------------------------
+    if info["faltantes"]:
+        st.error(
+            f"⚠️ **{len(info['faltantes'])} caso(s) del Excel no aparecen en la app.** "
+            "Revise si tienen el número de caso bien diligenciado:"
+        )
+        st.code("\n".join(info["faltantes"][:50]))
+        if len(info["faltantes"]) > 50:
+            st.caption(f"…y {len(info['faltantes']) - 50} más.")
+    elif info["disponible"]:
+        st.info("✅ Ningún caso del Excel quedó por fuera: todos aparecen en el tablero.")
+
+    # --- Completitud por columna ------------------------------------------
+    if not info["completitud"].empty:
+        st.markdown("##### Completitud por campo")
+        st.caption(
+            "Cuántas filas traen cada dato diligenciado. Los campos vacíos explican "
+            "los casos 'sin vencimiento' o 'sin técnico'."
+        )
+        st.dataframe(
+            info["completitud"].style.format({"% completo": "{:.1f}%"}),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # --- Antigüedad del archivo -------------------------------------------
+    if info.get("archivo"):
+        st.markdown("##### Origen de los datos")
+        st.caption(f"Archivo: `{info['archivo']}`")
+
+    if st.button("🔄 Volver a auditar", key="reauditar", use_container_width=False):
+        st.cache_data.clear()
+        st.rerun()
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Torre de Control SLA - Colsof",
@@ -1113,8 +1287,13 @@ def main() -> None:
     # --- Lectura de Datos -------------------------------------------------
     try:
         with st.spinner("Leyendo la plantilla y calculando SLA..."):
+            devuelto = lector()
             (df, df_completo, total_hoja, total_activos,
-             dias_ventana, avisos) = lector()
+             dias_ventana, avisos) = devuelto[:6]
+            # Los dos ultimos son opcionales (compatibilidad si alguna version
+            # de cargar() no los devuelve todavia)
+            df_crudo = devuelto[6] if len(devuelto) > 6 else None
+            nombre_archivo = devuelto[7] if len(devuelto) > 7 else "plantilla.xlsx"
     except ErrorLecturaExcel as exc:
         st.error("❌ No se pudo leer el archivo Excel.")
         st.warning(
@@ -1187,11 +1366,12 @@ def main() -> None:
     # =====================================================================
     # NAVEGACIÓN PRINCIPAL EN PESTAÑAS (ST.TABS)
     # =====================================================================
-    tab_despacho, tab_explorador, tab_analitica, tab_historial = st.tabs([
+    tab_despacho, tab_explorador, tab_analitica, tab_historial, tab_integridad = st.tabs([
         "🎯 Despacho Operativo",
         "📋 Explorador de Casos & SLA",
         "📊 Analítica & Técnicos",
         "📜 Historial & Auditoría",
+        "🔍 Integridad de datos",
     ])
 
     # ---------------------------------------------------------------------
@@ -1247,6 +1427,31 @@ def main() -> None:
         # Recuperar df_vista o calcular si se cambia de pestaña
         if "df_vista" not in locals():
             df_vista = df_completo
+
+        # --- Conjunto recibido desde una tarjeta de Despacho ----------------
+        # Los botones "Ver los N en el Explorador" dejan aqui la lista exacta,
+        # para que se vean JUSTO esos casos sin volver a filtrar a mano.
+        conjunto = st.session_state.get("set_explorador")
+        if conjunto is not None and not conjunto.empty:
+            origen = st.session_state.get("origen_explorador", "lista seleccionada")
+            av1, av2 = st.columns([5, 1.4])
+            with av1:
+                st.info(
+                    f"🎯 Mostrando el conjunto cargado desde **{origen}**: "
+                    f"**{len(conjunto)}** caso(s). Los filtros de abajo se aplican "
+                    "sobre este conjunto."
+                )
+            with av2:
+                if st.button(
+                    "✖️ Quitar conjunto",
+                    key="quitar_conjunto_explorador",
+                    use_container_width=True,
+                    help="Volver a ver todos los casos del sistema.",
+                ):
+                    st.session_state.pop("set_explorador", None)
+                    st.session_state.pop("origen_explorador", None)
+                    st.rerun()
+            df_vista = conjunto.copy()
 
         st.subheader("🔎 Filtros avanzados de casos")
         f1, f2, f3, f4 = st.columns([2, 2, 2, 2])
@@ -1386,6 +1591,12 @@ def main() -> None:
                     mime="text/csv",
                     key="descarga_historial_tab",
                 )
+
+    # ---------------------------------------------------------------------
+    # PESTANA 5: INTEGRIDAD DE DATOS
+    # ---------------------------------------------------------------------
+    with tab_integridad:
+        render_integridad(df_crudo, df_completo, nombre_archivo)
 
     if autorrefresco:
         import time

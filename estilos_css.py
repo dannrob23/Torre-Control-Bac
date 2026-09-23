@@ -109,6 +109,61 @@ html, body, [class*="css"] {
     background-color: #F3F4F6;
 }
 
+/* Colores de fondo por estado: permiten escanear la lista de un vistazo,
+   no solo por el emoji del badge. Se aplican junto con .fila-accion-card.
+   El borde izquierdo grueso refuerza la lectura semaforica. */
+.fila-accion-card.fondo-rojo {
+    background-color: #FEF2F2;
+    border-left: 5px solid #DC2626;
+}
+.fila-accion-card.fondo-rojo:hover { background-color: #FEE2E2; }
+
+.fila-accion-card.fondo-cerrado-tarde {
+    background-color: #FEF2F2;
+    border-left: 5px solid #7F1D1D;
+}
+.fila-accion-card.fondo-cerrado-tarde:hover { background-color: #FEE2E2; }
+
+.fila-accion-card.fondo-naranja {
+    background-color: #FFF7ED;
+    border-left: 5px solid #EA580C;
+}
+.fila-accion-card.fondo-naranja:hover { background-color: #FFEDD5; }
+
+.fila-accion-card.fondo-amarillo {
+    background-color: #FEFCE8;
+    border-left: 5px solid #CA8A04;
+}
+.fila-accion-card.fondo-amarillo:hover { background-color: #FEF9C3; }
+
+.fila-accion-card.fondo-verde {
+    background-color: #F0FDF4;
+    border-left: 5px solid #16A34A;
+}
+.fila-accion-card.fondo-verde:hover { background-color: #DCFCE7; }
+
+.fila-accion-card.fondo-gris {
+    background-color: #F9FAFB;
+    border-left: 5px solid #9CA3AF;
+}
+
+/* Encabezado de lista con el total real de casos */
+.encabezado-lista {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 2px;
+}
+.encabezado-lista .conteo-total {
+    font-size: 13px;
+    font-weight: 700;
+    color: #374151;
+    background-color: #F3F4F6;
+    border-radius: 999px;
+    padding: 2px 10px;
+}
+
 /* Estilo para pestañas principales */
 .stTabs [data-baseweb="tab-list"] {
     gap: 8px;

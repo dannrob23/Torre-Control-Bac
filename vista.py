@@ -440,6 +440,18 @@ def _resumen_tecnicos(df: pd.DataFrame, top: int = 4) -> str:
     return " · ".join(nombres)
 
 
+def _clase_fondo(estado: str) -> str:
+    """Clase CSS con el color de fondo semaforico para la fila."""
+    return {
+        ROJO: "fondo-rojo",
+        CERRADO_TARDE: "fondo-cerrado-tarde",
+        NARANJA: "fondo-naranja",
+        AMARILLO: "fondo-amarillo",
+        VERDE: "fondo-verde",
+        CERRADO_OK: "fondo-verde",
+    }.get(estado, "fondo-gris")
+
+
 def fila_accion_html(fila: pd.Series) -> str:
     """HTML de una fila de la lista de accion (caso + tiempo + contexto)."""
     estado = str(fila.get("ESTADO", ""))
@@ -467,7 +479,7 @@ def fila_accion_html(fila: pd.Series) -> str:
         contexto += f" · {region}"
 
     return (
-        f"<div class='fila-accion-card'>"
+        f"<div class='fila-accion-card {_clase_fondo(estado)}'>"
         f"<div style='display:flex;align-items:center;justify-content:space-between;'>"
         f"<span style='font-weight:700;font-size:15px;color:#111827;'>{icono} {caso}</span>"
         f"<span class='badge-sla {clase_badge}'>{tiempo}</span>"
@@ -495,17 +507,35 @@ def lista_accion(
     import avisos
     import telegram_notifier
 
-    st.markdown(f"#### {titulo}")
-    if subtitulo:
-        st.caption(subtitulo)
-
     if df is None or df.empty:
+        st.markdown(f"#### {titulo}")
         st.info(vacio)
         return
 
+    # --- Encabezado con el TOTAL real, sin truncados silenciosos -----------
+    n_total = len(df)
+    st.markdown(
+        f"<div class='encabezado-lista'>"
+        f"<span style='font-size:17px;font-weight:700;'>{titulo}</span>"
+        f"<span class='conteo-total'>{n_total} caso{'s' if n_total != 1 else ''}</span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    if subtitulo:
+        st.caption(subtitulo)
+
+    # --- contador de filas visibles, persistido por lista ------------------
+    clave_vista = f"_ver_{clave}"
+    if clave_vista not in st.session_state:
+        st.session_state[clave_vista] = limite
+    visibles = max(int(st.session_state[clave_vista]), limite)
+    visibles = min(visibles, n_total)
+    st.session_state[clave_vista] = visibles
+
     menciones = avisos.cargar_menciones()
 
-    for i, (_, fila) in enumerate(df.head(limite).iterrows()):
+    for i in range(visibles):
+        fila = df.iloc[i]
         tecnico = str(fila.get("TECNICO", "") or "").strip()
         c1, c2 = st.columns([4.8, 1.6])
         with c1:
@@ -596,15 +626,90 @@ def lista_accion(
                         else:
                             st.caption("Telegram no configurado")
 
-        if i < min(limite, len(df)) - 1:
+        if i < visibles - 1:
             st.markdown("<div style='margin-bottom:6px;'></div>", unsafe_allow_html=True)
 
-    restantes = len(df) - min(limite, len(df))
-    if restantes > 0:
-        st.caption(
-            f"…y **{restantes}** caso(s) más. Revisa la pestaña de **Explorador de Casos** "
-            "para filtrarlos todos."
+    # --- Controles de la lista completa ------------------------------------
+    # NO se oculta nada: se indica el rango mostrado sobre el total, se permite
+    # seguir mostrando de a poco y se ofrece la descarga completa.
+    faltan = n_total - visibles
+    c_ver, c_filtro, c_csv = st.columns([1.3, 1.5, 1.6])
+
+    with c_ver:
+        if faltan > 0:
+            if st.button(
+                f"➕ Ver {min(limite, faltan)} más",
+                key=f"{clave}_vermas",
+                use_container_width=True,
+            ):
+                st.session_state[clave_vista] = visibles + limite
+                st.rerun()
+        else:
+            st.button(
+                "✅ Lista completa",
+                key=f"{clave}_completa",
+                use_container_width=True,
+                disabled=True,
+            )
+
+    with c_filtro:
+        if st.button(
+            f"🔎 Ver los {n_total} en el Explorador",
+            key=f"{clave}_ir_explorador",
+            use_container_width=True,
+            help="Abre la pestaña Explorador de Casos con este mismo conjunto.",
+        ):
+            # Se guarda la lista para que el Explorador la muestre tal cual.
+            st.session_state["set_explorador"] = df.copy()
+            st.session_state["origen_explorador"] = titulo
+            st.success(
+                "✅ Conjunto cargado. Abre la pestaña **📋 Explorador de Casos & SLA**."
+            )
+
+    with c_csv:
+        st.download_button(
+            f"⬇️ Descargar los {n_total} (CSV)",
+            data=_csv_lista(df),
+            file_name=f"{_nombre_archivo(titulo)}_{datetime.now():%Y%m%d_%H%M}.csv",
+            mime="text/csv",
+            key=f"{clave}_csv",
+            use_container_width=True,
         )
+
+    st.caption(
+        f"Mostrando **{visibles}** de **{n_total}** · "
+        f"Ordenados del más urgente al menos urgente."
+        + (" Nada oculto: usa *Ver más* o descarga el CSV." if faltan else "")
+    )
+
+
+def _nombre_archivo(texto: str) -> str:
+    """Convierte un titulo en nombre de archivo valido."""
+    limpio = "".join(c if c.isalnum() or c in " -_" else "" for c in str(texto))
+    return "_".join(limpio.split())[:60] or "casos"
+
+
+def _csv_lista(df: pd.DataFrame) -> bytes:
+    """
+    CSV con las columnas utiles de la lista, listo para abrir en Excel.
+
+    Se usa utf-8-sig para que Excel respete las tildes y la enye.
+    """
+    columnas = [
+        (COL_CASO, "Caso"),
+        ("ESTADO", "Estado"),
+        ("TIEMPO_VENCIDO", "Tiempo vencido"),
+        ("TIEMPO_RESTANTE", "Tiempo restante"),
+        ("FECHA_VENCIMIENTO", "Vencimiento"),
+        ("TECNICO", "Tecnico"),
+        ("REGION_TECNICO", "Region"),
+        (COL_CIUDAD, "Oficina"),
+        ("HORAS_VENCIDO", "Horas vencido"),
+        ("HORAS_RESTANTES", "Horas restantes"),
+    ]
+    presentes = [(c, n) for c, n in columnas if c in df.columns]
+    vista = df[[c for c, _ in presentes]].rename(columns=dict(presentes))
+    return vista.to_csv(index=False).encode("utf-8-sig", errors="replace")
 
 
 # ---------------------------------------------------------------------------

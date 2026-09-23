@@ -54,7 +54,21 @@ SECCION_CREDENCIALES = "credenciales"
 SECCION_COOKIE = "cookie"
 
 NOMBRE_COOKIE_POR_DEFECTO = "torre_control_sla"
-DIAS_COOKIE_POR_DEFECTO = 7.0
+
+# Duracion de la sesion en dias.
+#
+# POR QUE 30 Y NO 7:
+#   Streamlit Cloud duerme la app por inactividad y la reinicia al volver a
+#   entrar. En cada reinicio se pierde st.session_state, asi que lo UNICO que
+#   mantiene la sesion abierta es la cookie. Con 7 dias, quien entra solo los
+#   dias habiles volvia a ver el login cada semana.
+#
+# IMPORTANTE: si cambia 'cookie.key' en secrets.toml, TODAS las sesiones
+# abiertas se invalidan de golpe y todos tendran que volver a ingresar.
+DIAS_COOKIE_POR_DEFECTO = 30.0
+
+# Si la configuracion trae menos dias que esto, se avisa y se sube al minimo.
+DIAS_COOKIE_MINIMO = 30.0
 
 
 # --------------------------------------------------------------------------
@@ -226,6 +240,21 @@ def _permitir_mayusculas(authenticator) -> bool:
     return True
 
 
+def _dias_cookie(cookie: dict) -> float:
+    """
+    Duracion de la sesion, con un minimo sensato.
+
+    Si secrets.toml trae un valor menor (por ejemplo el 7 anterior), se sube al
+    minimo para que la torre no tenga que iniciar sesion cada semana. La sesion
+    sigue siendo segura: la cookie esta firmada y vence igual.
+    """
+    try:
+        configurado = float(cookie.get("expiry_days", DIAS_COOKIE_POR_DEFECTO))
+    except (TypeError, ValueError):
+        configurado = DIAS_COOKIE_POR_DEFECTO
+    return max(configurado, DIAS_COOKIE_MINIMO)
+
+
 def _motor():
     """Construye el Authenticate de streamlit-authenticator o None si falta config."""
     credenciales = _a_diccionario(_leer_secreto(SECCION_CREDENCIALES))
@@ -239,7 +268,7 @@ def _motor():
         credenciales,
         str(cookie.get("name", NOMBRE_COOKIE_POR_DEFECTO)),
         clave_cookie,
-        float(cookie.get("expiry_days", DIAS_COOKIE_POR_DEFECTO)),
+        _dias_cookie(cookie),
     )
     _permitir_mayusculas(authenticator)
     return authenticator
@@ -287,9 +316,30 @@ def exigir_login() -> dict:
 
     if not estado:
         # Todavia no ha enviado el formulario: ya se ve el formulario arriba.
+        #
+        # NOTA sobre "se cierra la sesion sola":
+        #   Streamlit Cloud apaga la app tras un rato sin uso y la reinicia al
+        #   volver a entrar. En ese reinicio se pierde st.session_state, pero la
+        #   COOKIE firmada deberia restaurar la sesion sin pedir nada. Si aparece
+        #   este formulario despues de haber estado dentro, casi siempre es que
+        #   la clave 'cookie.key' de secrets.toml cambio (por ejemplo al volver a
+        #   generar el archivo). Al cambiarla, todas las sesiones se invalidan.
         st.caption(
             "🔒 Los datos del banco no se cargan hasta iniciar sesión."
         )
+        with st.expander("ℹ️ ¿Por qué me pide la contraseña otra vez?"):
+            st.markdown(
+                "La sesión se guarda en una **cookie firmada** que dura "
+                f"**{_dias_cookie(_a_diccionario(_leer_secreto(SECCION_COOKIE)) or {}):.0f} días**. "
+                "Se le pide ingresar de nuevo si:\n\n"
+                "- Pasó ese tiempo.\n"
+                "- **Cambió la clave `cookie.key`** en los secretos: eso invalida "
+                "todas las sesiones de golpe.\n"
+                "- Entró desde otro navegador o en modo incógnito.\n"
+                "- Borró las cookies del navegador.\n\n"
+                "Si le vuelve a pasar en pocas horas, avise a quien administra el "
+                "sistema: revise que `cookie.key` no se esté cambiando."
+            )
         st.stop()
 
     # --- Sesion iniciada ---------------------------------------------------

@@ -345,10 +345,13 @@ def exigir_login() -> dict:
     # --- Sesion iniciada ---------------------------------------------------
     with st.sidebar:
         st.success(f"👤 {nombre or usuario}", icon="✅")
+        # OJO: aqui se usa use_container_width, NO width. Este logout() es de
+        # streamlit-authenticator (0.4.2), que solo acepta use_container_width
+        # (bool). Pasarle width="stretch" revienta la app al entrar.
         authenticator.logout(
             button_name="🚪 Cerrar sesión",
             location="sidebar",
-            width="stretch",
+            use_container_width=True,
             key="logout_torre_control",
         )
 

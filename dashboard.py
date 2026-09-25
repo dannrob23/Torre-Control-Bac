@@ -84,6 +84,10 @@ import auth
 # barra de semaforo segmentada y listas de accion.
 import vista
 
+# El panel de conciliacion se importa por nombre: dentro de render_plan_trabajo()
+# la variable local "vista" guarda la lectura del plan, y taparia al modulo.
+from vista import render_conciliacion
+
 # Analitica del Plan de Trabajo mensual (cartera vencida, envejecimiento y ANS).
 # Es independiente de la plantilla SLA: trabaja sobre otro archivo.
 import plan
@@ -1448,7 +1452,7 @@ def normalizar_generico(valor) -> str:
 # respondian a otra pregunta ("que habia abierto ese dia") y confundian la
 # lectura: el usuario espera ver su hoja, con sus 145 filas.
 
-def render_plan_trabajo() -> None:
+def render_plan_trabajo(df_completo: pd.DataFrame | None = None) -> None:
     """
     Pestaña del Plan de Trabajo: todo el contenido de la hoja Casos_Ven.
 
@@ -1578,6 +1582,11 @@ def render_plan_trabajo() -> None:
 
     # --- Validacion de fechas --------------------------------------------
     _panel_validacion_fechas(contenido)
+
+    # --- Conciliacion con la plantilla SLA --------------------------------
+    # Cruza los dos archivos y muestra donde se contradicen (conciliacion.py).
+    st.divider()
+    render_conciliacion(df_completo, contenido)
 
     # --- Detalle ----------------------------------------------------------
     st.markdown("##### 📋 Detalle caso a caso")
@@ -2194,7 +2203,7 @@ def main() -> None:
     # PESTANA 5: PLAN DE TRABAJO & ANS
     # ---------------------------------------------------------------------
     with tab_plan:
-        render_plan_trabajo()
+        render_plan_trabajo(df_completo)
 
     # ---------------------------------------------------------------------
     # PESTANA 6: INTEGRIDAD DE DATOS

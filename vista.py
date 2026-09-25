@@ -44,6 +44,9 @@ from core import (
     VERDE,
 )
 
+# Cruce del Plan de Trabajo con la plantilla SLA (ver conciliacion.py).
+import conciliacion
+
 # ---------------------------------------------------------------------------
 # Colores (mismos del dashboard, para no romper la identidad visual)
 # ---------------------------------------------------------------------------
@@ -770,3 +773,120 @@ def construir_listas(df_completo: pd.DataFrame, ahora: datetime) -> dict:
         "n_vencen_hoy": len(futuros),
         "n_proximos_3d": len(tres_dias),
     }
+
+
+# ---------------------------------------------------------------------------
+# Conciliacion Plan de Trabajo <-> plantilla SLA
+# ---------------------------------------------------------------------------
+
+def render_conciliacion(df_completo: pd.DataFrame, plan_bytes) -> None:
+    """
+    Panel que cruza el Plan de Trabajo con la plantilla SLA.
+
+    Muestra UNICAMENTE donde los dos archivos se contradicen: el plan reporta un
+    cierre que la plantilla no tiene, casos repetidos, casos que solo estan en uno
+    de los dos, y fechas que no cuadran (incluida la inversion mes/dia).
+
+    No decide nada: avisa, y deja a la vista la nota manual del plan.
+    """
+    st.subheader("🔀 Conciliación con la plantilla SLA")
+    st.caption(
+        "Cruza el Plan de Trabajo con la plantilla de seguimiento por N° DE CASO y "
+        "muestra solo donde se contradicen. La app **no decide**: avisa, y deja a la "
+        "vista la **nota manual del plan (columna I)** para que la revise la torre."
+    )
+
+    if df_completo is None or df_completo.empty:
+        st.info(
+            "Suba también la **plantilla de seguimiento** para poder cruzar los dos "
+            "archivos (barra lateral → *Cargar archivo*)."
+        )
+        return
+    if not plan_bytes:
+        st.info("Suba el **Plan de Trabajo** para poder cruzar los dos archivos.")
+        return
+
+    with st.spinner("Cruzando el plan con la plantilla..."):
+        try:
+            cruce = conciliacion.conciliar(plan_bytes, df_completo)
+        except Exception as exc:
+            st.error("❌ No se pudieron cruzar los dos archivos.")
+            st.code(f"{type(exc).__name__}: {exc}")
+            return
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Casos en el plan", cruce["total_plan"])
+    k2.metric("Casos en la plantilla", cruce["total_plantilla"])
+    k3.metric("✅ Coinciden", cruce["coinciden"])
+    k4.metric("⚠️ Con desajuste", cruce["desajustes"])
+
+    if cruce["resumen"].empty:
+        st.success(
+            "✅ El plan y la plantilla coinciden: no se encontró ningún desajuste."
+        )
+        return
+
+    st.markdown("##### Qué se encontró")
+    st.dataframe(cruce["resumen"], width="stretch", hide_index=True)
+
+    tabla = cruce["tabla"]
+    con_desajuste = tabla[tabla["_tipos"].map(len) > 0]
+
+    etiquetas = {
+        f"{conciliacion.ICONO_TIPO[tipo]} {tipo}": tipo
+        for tipo in conciliacion.TIPOS
+        if cruce["conteos"].get(tipo)
+    }
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        elegidos = st.multiselect(
+            "Tipo de desajuste", list(etiquetas), default=list(etiquetas),
+            key="conc_tipos",
+        )
+    with c2:
+        busqueda = st.text_input(
+            "🔍 Buscar caso, técnico o nota",
+            placeholder="Ej: IM3238158 o ALIADO",
+            key="conc_busqueda",
+        )
+
+    seleccionados = {etiquetas[e] for e in elegidos}
+    vista = con_desajuste[
+        con_desajuste["_tipos"].map(
+            lambda tipos: bool(set(tipos) & seleccionados) if seleccionados else False
+        )
+    ]
+    if busqueda.strip():
+        patron = busqueda.strip().upper()
+        vista = vista[
+            vista.apply(
+                lambda fila: patron in " ".join(str(v).upper() for v in fila.values),
+                axis=1,
+            )
+        ]
+
+    visible = vista.drop(columns=["_tipos"])
+    st.markdown(
+        f"#### 🔎 Casos con desajuste ({len(visible)} de {len(con_desajuste)})"
+    )
+    if visible.empty:
+        st.info("Ningún caso coincide con los filtros seleccionados.")
+    else:
+        st.dataframe(
+            visible,
+            width="stretch",
+            hide_index=True,
+            height=min(650, 40 + 35 * len(visible)),
+        )
+        st.download_button(
+            "⬇️ Descargar la conciliación (CSV)",
+            data=visible.to_csv(index=False).encode("utf-8-sig"),
+            file_name="conciliacion_plan_plantilla.csv",
+            mime="text/csv",
+            key="descarga_conciliacion",
+        )
+    st.caption(
+        "**Plan: Nota (col I)** = nota manual de la hoja diaria más reciente. "
+        "**Plan: Justificación** = justificación de la hoja `Casos_Ven`. "
+        "Cuando los dos archivos chocan, manda la nota manual."
+    )

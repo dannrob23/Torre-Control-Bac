@@ -437,6 +437,93 @@ def leer_cosecha_diaria(archivo: str | bytes, anio: int = ANIO_DEFECTO) -> pd.Da
 
 
 # ---------------------------------------------------------------------------
+# Lectura del "manual" del plan: las notas de las hojas diarias
+# ---------------------------------------------------------------------------
+
+# Columna I de las hojas diarias: lo que el equipo escribe a mano ("ALIADO EN
+# SITIO", "MESA-COLSOF", "SE ENVIO A TIEMPOS"...). Es la fuente que la torre
+# considera la verdad cuando el plan y la plantilla se contradicen.
+COL_NOTA = "NOTA_MANANA"
+COL_NOTA_NORMALIZADA = "NOTA_MANANA_NORMALIZADA"
+
+
+def leer_manual_plan(archivo: str | bytes, anio: int | None = None) -> pd.DataFrame:
+    """
+    Devuelve, caso por caso y hoja por hoja, lo que el equipo anoto a mano.
+
+    Columnas: ``COL_ID_DIARIO``, ``HOJA``, ``FECHA_HOJA``, ``COL_APERTURA``,
+    ``COL_VENCIMIENTO``, ``COL_ASIGNATARIO``, ``COL_UBICACION_DIARIA``,
+    ``COL_NOTA``, ``COL_NOTA_NORMALIZADA``, ``COL_ESTADO_DIARIO``, ``COL_ATIENDE``.
+
+    Sirve para conciliar el plan con la plantilla SLA (ver ``conciliacion.py``):
+    la nota manual es la que manda cuando los dos archivos dicen cosas distintas.
+
+    ``anio`` se deduce del propio libro (de la hoja Casos_Ven) si no se indica,
+    porque el nombre de las hojas diarias no trae el anio.
+    """
+    if anio is None:
+        try:
+            anio = inferir_anio(leer_vencidos(archivo, hoja=HOJA_VENCIDOS))
+        except Exception:
+            anio = ANIO_DEFECTO
+
+    nombres = _nombres_hojas(archivo)
+    diarias = hojas_diarias(nombres, anio)
+    if not diarias:
+        raise ErrorPlan(
+            "No se detecto ninguna hoja diaria (se esperaban nombres como "
+            "'17_Septiembre'). Hojas encontradas: " + ", ".join(map(str, nombres))
+        )
+
+    partes = []
+    for hoja, fecha in diarias.items():
+        df = _leer_hoja(archivo, hoja)
+        col_id = _buscar_columna(df, [COL_ID_DIARIO, "ID de incidente", "ID incidente"])
+        if col_id is None:
+            continue
+        df = df.rename(columns={col_id: COL_ID_DIARIO})
+        df[COL_ID_DIARIO] = df[COL_ID_DIARIO].astype(str).str.strip()
+        df = df[df[COL_ID_DIARIO].ne("") & df[COL_ID_DIARIO].ne("NAN")]
+        if df.empty:
+            continue
+
+        def columna(nombres_col, defecto=""):
+            real = _buscar_columna(df, nombres_col)
+            if real is None:
+                return pd.Series([defecto] * len(df), index=df.index)
+            return df[real]
+
+        notas = columna([COL_NOTA, "NOTAS MANANA"], "").reset_index(drop=True)
+        apertura = pd.to_datetime(
+            columna([COL_APERTURA], pd.NaT).reset_index(drop=True),
+            errors="coerce", format="mixed",
+        )
+        vencimiento = pd.to_datetime(
+            columna([COL_VENCIMIENTO], pd.NaT).reset_index(drop=True),
+            errors="coerce", format="mixed", dayfirst=True,
+        )
+
+        partes.append(pd.DataFrame({
+            COL_ID_DIARIO: df[COL_ID_DIARIO].values,
+            "HOJA": hoja,
+            "FECHA_HOJA": fecha,
+            COL_APERTURA: apertura.values,
+            COL_VENCIMIENTO: vencimiento.values,
+            COL_ASIGNATARIO: columna([COL_ASIGNATARIO]).values,
+            COL_UBICACION_DIARIA: columna([COL_UBICACION_DIARIA]).values,
+            COL_NOTA: notas.values,
+            COL_NOTA_NORMALIZADA: notas.map(normalizar).values,
+            COL_ESTADO_DIARIO: columna([COL_ESTADO_DIARIO]).values,
+            COL_ATIENDE: columna([COL_ATIENDE]).values,
+        }))
+
+    if not partes:
+        raise ErrorPlan("Las hojas diarias no tienen la columna 'ID de incidente'.")
+
+    return pd.concat(partes, ignore_index=True)
+
+
+# ---------------------------------------------------------------------------
 # Correccion de fechas invertidas
 # ---------------------------------------------------------------------------
 

@@ -150,9 +150,14 @@ TECNICOS_REGION = {
 # literalmente con el diccionario oficial.
 #   - 'DIEGO ALEJANDRO HERNANDEZ'  -> en la plantilla falta el apellido 'OROZCO'
 #   - 'JHONATHAN FELIPE JARABA CHALARCA' -> en la plantilla hay un typo ('JHO' por 'JO')
+#   - 'JHON SEBASTIAN MORENO VALENCIA' -> typo ('JHON' por 'JOHAN'). Sin este alias
+#     el tecnico quedaba partido en dos: sus casos salian en Bogota con una grafia
+#     y en Regionales con la otra, porque la regla es "lo que no diga Bogota es
+#     regionales". Verificado en la plantilla de septiembre: 50 casos + 4 casos.
 ALIAS_TECNICOS = {
     "DIEGO ALEJANDRO HERNANDEZ": "DIEGO ALEJANDRO HERNANDEZ OROZCO",
     "JHONATHAN FELIPE JARABA CHALARCA": "JONATHAN FELIPE JARABA CHALARCA",
+    "JHON SEBASTIAN MORENO VALENCIA": "JOHAN SEBASTIAN MORENO VALENCIA",
 }
 
 
@@ -253,6 +258,20 @@ def tecnicos_sin_region(df: pd.DataFrame) -> list[str]:
         return []
     crudos = df.loc[df["REGION_TECNICO"] == REGION_DESCONOCIDA, "TECNICO"].dropna().unique()
     return sorted({str(t).strip() for t in crudos if str(t).strip()})
+
+
+def nombre_canonico_tecnico(valor) -> str:
+    """
+    Nombre del tecnico resuelto a la grafia del diccionario oficial.
+
+    Sirve para que la MISMA persona no aparezca dos veces con dos grafias en los
+    informes por tecnico (ej. 'JHON...' y 'JOHAN...'). Si no es un alias conocido,
+    devuelve el nombre tal cual venia (ya con espacios normalizados).
+    """
+    nombre = " ".join(str(valor if valor is not None else "").split())
+    if not nombre:
+        return ""
+    return _MAPA_ALIAS_NORMALIZADO.get(normalizar_texto(nombre), nombre)
 
 
 # ---------------------------------------------------------------------------

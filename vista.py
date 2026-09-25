@@ -31,6 +31,8 @@ from core import (
     CERRADO_TARDE,
     COL_CASO,
     COL_CIUDAD,
+    COL_ES_DUPLICADO,
+    DUPLICADO,
     ICONO_ESTADO,
     ahora_colombia,
     NARANJA,
@@ -53,6 +55,7 @@ COLOR_SEMAFORO = {
     VERDE: "#15803D",
     SIN_VENCIMIENTO: "#9CA3AF",
     CERRADO_OK: "#15803D",
+    DUPLICADO: "#7C3AED",
 }
 
 # Colores de las etiquetas de tiempo en las listas de accion.
@@ -64,6 +67,7 @@ COLOR_ETIQUETA = {
     VERDE: ("#DCFCE7", "#15803D"),
     SIN_VENCIMIENTO: ("#F3F4F6", "#6B7280"),
     CERRADO_OK: ("#DCFCE7", "#15803D"),
+    DUPLICADO: ("#EDE9FE", "#5B21B6"),
 }
 
 # ---------------------------------------------------------------------------
@@ -732,6 +736,10 @@ def construir_listas(df_completo: pd.DataFrame, ahora: datetime) -> dict:
 
     df = df_completo
     abiertos = df[~df["CERRADO"]] if "CERRADO" in df.columns else df
+    # Las filas repetidas no entran en las listas de accion: un caso duplicado no
+    # debe aparecer dos veces ni disparar una alerta por una fila ya cerrada.
+    if COL_ES_DUPLICADO in abiertos.columns:
+        abiertos = abiertos[~abiertos[COL_ES_DUPLICADO].fillna(False).astype(bool)]
     venc = pd.to_datetime(abiertos["FECHA_VENCIMIENTO"], errors="coerce")
 
     # Vencidos sin cerrar: el mas atrasado primero.

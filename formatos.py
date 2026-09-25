@@ -49,7 +49,7 @@ ESTILOS = (
 # Orden de presentacion por gravedad.
 ORDEN_PRESENTACION = [
     "ROJO", "CERRADO TARDE", "NARANJA", "AMARILLO", "VERDE",
-    "SIN VENCIMIENTO", "CERRADO OK",
+    "SIN VENCIMIENTO", "CERRADO OK", "DUPLICADO",
 ]
 
 ICONO = {
@@ -60,6 +60,7 @@ ICONO = {
     "VERDE": "🟢",
     "SIN VENCIMIENTO": "⚪",
     "CERRADO OK": "✅",
+    "DUPLICADO": "🔁",
 }
 
 # Texto corto de cada estado, para encabezados de grupo.
@@ -71,6 +72,7 @@ TITULO_ESTADO = {
     "VERDE": "A TIEMPO",
     "SIN VENCIMIENTO": "SIN FECHA DE VENCIMIENTO",
     "CERRADO OK": "CERRADOS A TIEMPO",
+    "DUPLICADO": "CASOS REPETIDOS EN LA PLANTILLA",
 }
 
 

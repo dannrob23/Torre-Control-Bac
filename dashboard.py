@@ -41,8 +41,12 @@ from core import (
     COL_CASO,
     COL_CIUDAD,
     COL_DEPARTAMENTO,
+    COL_ES_DUPLICADO,
+    COL_ESTADO_CALCULADO,
+    COL_FILAS_REPETIDAS,
     COL_REGIONAL,
     COL_VENCIMIENTO,
+    DUPLICADO,
     ESTADOS_ALERTA,
     ICONO_ESTADO,
     NARANJA,
@@ -58,6 +62,7 @@ from core import (
     leer_casos,
     localizar_excel,
     metricas_por_tecnico,
+    resumen_duplicados,
 )
 from historial import (
     CANAL_WHATSAPP,
@@ -106,8 +111,10 @@ def dibujar_graficos_altair(filtrado: pd.DataFrame) -> None:
             .reset_index(name="CASOS")
         )
         color_scale = alt.Scale(
-            domain=[ROJO, CERRADO_TARDE, NARANJA, AMARILLO, VERDE, SIN_VENCIMIENTO, CERRADO_OK],
-            range=["#B91C1C", "#8B0000", "#C2410C", "#A16207", "#15803D", "#6B7280", "#15803D"],
+            domain=[ROJO, CERRADO_TARDE, NARANJA, AMARILLO, VERDE, SIN_VENCIMIENTO,
+                    CERRADO_OK, DUPLICADO],
+            range=["#B91C1C", "#8B0000", "#C2410C", "#A16207", "#15803D", "#6B7280",
+                   "#15803D", "#7C3AED"],
         )
         chart_region = (
             alt.Chart(df_region)
@@ -157,6 +164,7 @@ COLORES_FONDO = {
     VERDE: "#E3F7E3",            # verde claro -> mas de 4 horas
     SIN_VENCIMIENTO: "#EFEFEF",  # gris -> sin fecha en la plantilla
     CERRADO_OK: "#D6F5D6",       # verde claro -> cerrado a tiempo
+    DUPLICADO: "#EDE9FE",        # violeta claro -> N° DE CASO repetido
 }
 COLORES_TEXTO = {
     ROJO: "#A30000",
@@ -166,6 +174,7 @@ COLORES_TEXTO = {
     VERDE: "#136B13",
     SIN_VENCIMIENTO: "#555555",
     CERRADO_OK: "#0B5D0B",
+    DUPLICADO: "#5B21B6",
 }
 
 # Texto de ayuda de cada tarjeta KPI, en el orden de gravedad de ORDEN_ESTADO.
@@ -177,6 +186,10 @@ AYUDA_ESTADO = {
     VERDE: "Abierto: mas de 4 horas para vencer.",
     SIN_VENCIMIENTO: "Activo o cerrado sin fecha de vencimiento en la plantilla.",
     CERRADO_OK: "Cerrado a tiempo (resolucion <= vencimiento).",
+    DUPLICADO: (
+        "El N° DE CASO aparece varias veces en la plantilla: se muestra con sus "
+        "copias, pero no se cuenta en el semáforo ni en las métricas."
+    ),
 }
 
 # Columnas de la tabla de casos (incluye el tiempo vencido y la prediccion v2).
@@ -193,6 +206,8 @@ COLUMNAS_TABLA = {
     "HORAS_RESTANTES": "Horas restantes",
     "PREDICCION": "Prediccion",
     "ESTADO": "Estado",
+    COL_ESTADO_CALCULADO: "Estado calculado",
+    COL_FILAS_REPETIDAS: "Filas repetidas",
     "ICONO": " ",
 }
 
@@ -1041,6 +1056,50 @@ def estilizar(df_visible: pd.DataFrame) -> pd.DataFrame:
 # Interfaz
 # ---------------------------------------------------------------------------
 
+def panel_duplicados(df_vista: pd.DataFrame) -> None:
+    """
+    Aviso y detalle de los casos con el N° DE CASO repetido en la plantilla.
+
+    Existe por un caso real: IM3238158 aparecia como CERRADO TARDE y a la vez el
+    sistema lo alertaba como abierto y vencido, porque la plantilla trae dos filas
+    del mismo caso (una sin cerrar y otra cerrada). Aqui se ven las dos copias y
+    se puede saltar a la tabla filtrada.
+    """
+    if df_vista is None or df_vista.empty or COL_ES_DUPLICADO not in df_vista.columns:
+        return
+
+    repetidos = resumen_duplicados(df_vista)
+    if repetidos.empty:
+        return
+
+    st.error(
+        f"🔁 **{len(repetidos)} caso(s) repetidos en la plantilla** "
+        f"({int(repetidos['VECES'].sum())} filas en total). Por eso un caso podía "
+        "aparecer **cerrado** y a la vez **alertando como abierto**: cada copia se "
+        "clasificaba por su cuenta. Se marcan **DUPLICADO** y **no se cuentan** en el "
+        "semáforo ni en las métricas (la app no borra ni elige ninguna fila)."
+    )
+    with st.expander(f"🔎 Ver el detalle de los {len(repetidos)} caso(s) repetidos"):
+        st.dataframe(repetidos, width="stretch", hide_index=True)
+        st.caption(
+            "**FILAS_EXCEL** = fila que ocupa cada copia en la hoja `PLANTILLA`. "
+            "**ESTADO_POR_FILA** = lo que le habría correspondido a cada copia antes "
+            "de marcarla como DUPLICADO."
+        )
+        st.caption(
+            "Para corregirlo en el Excel: deje **una sola fila** por N° DE CASO "
+            "(la que tenga la fecha de resolución) y borre la otra."
+        )
+
+    if st.button(
+        "🔁 Ver solo los casos repetidos en la tabla",
+        key="btn_ver_duplicados",
+        width="content",
+    ):
+        st.session_state["exp_estados"] = [DUPLICADO]
+        st.rerun()
+
+
 def auditar_integridad(df_crudo, df_completo, nombre_archivo: str = "") -> dict:
     """
     Comprueba que NINGUNA fila diligenciada se pierda entre el Excel y la app.
@@ -1069,6 +1128,9 @@ def auditar_integridad(df_crudo, df_completo, nombre_archivo: str = "") -> dict:
     dil_crudo = _diligenciadas(df_crudo)
     dil_proc = _diligenciadas(df_completo)
 
+    # Casos con el mismo N° DE CASO en varias filas: no se pierden, se marcan.
+    repetidos = resumen_duplicados(df_completo)
+
     # --- Casos del Excel que no llegaron a la app -------------------------
     faltantes: list[str] = []
     if COL_CASO in df_crudo.columns and df_completo is not None and COL_CASO in df_completo.columns:
@@ -1086,6 +1148,8 @@ def auditar_integridad(df_crudo, df_completo, nombre_archivo: str = "") -> dict:
         ("Filas procesadas por la app", n_procesado, "Resultado del calculo de SLA"),
         ("Filas diligenciadas (Excel)", dil_crudo, "Con caso o vencimiento"),
         ("Filas diligenciadas (app)", dil_proc, "Representadas en pantalla"),
+        ("Casos repetidos en la plantilla", len(repetidos),
+         "Mismo N° DE CASO en varias filas (se marcan DUPLICADO)"),
     ]
 
     columnas_revisadas = [
@@ -1120,6 +1184,7 @@ def auditar_integridad(df_crudo, df_completo, nombre_archivo: str = "") -> dict:
         "revisiones": revisiones,
         "completitud": pd.DataFrame(completitud),
         "faltantes": faltantes,
+        "duplicados": repetidos,
         "cuadra": cuadra,
     }
 
@@ -1181,6 +1246,22 @@ def render_integridad(df_crudo, df_completo, nombre_archivo: str = "") -> None:
             st.caption(f"…y {len(info['faltantes']) - 50} más.")
     elif info["disponible"]:
         st.info("✅ Ningún caso del Excel quedó por fuera: todos aparecen en el tablero.")
+
+    # --- Casos repetidos (mismo N° DE CASO en varias filas) ----------------
+    repetidos = info.get("duplicados")
+    if repetidos is not None and not repetidos.empty:
+        st.error(
+            f"🔁 **{len(repetidos)} caso(s) repetidos en la plantilla** "
+            f"({int(repetidos['VECES'].sum())} filas). La app NO borra ni elige una "
+            "copia: las marca **DUPLICADO** y las deja **fuera del semáforo y de las "
+            "métricas** hasta que se unifiquen en el Excel."
+        )
+        st.dataframe(repetidos, width="stretch", hide_index=True)
+        st.caption(
+            "**FILAS_EXCEL** = fila de la hoja `PLANTILLA` que ocupa cada copia. "
+            "**ESTADO_POR_FILA** = lo que le habría correspondido a cada copia antes "
+            "de marcarla como DUPLICADO."
+        )
 
     # --- Completitud por columna ------------------------------------------
     if not info["completitud"].empty:
@@ -1819,6 +1900,19 @@ def main() -> None:
     for aviso in avisos:
         st.warning(f"⚠️ {aviso}", icon="⚠️")
 
+    # --- Casos repetidos en la plantilla ----------------------------------
+    # Un N° DE CASO en varias filas es lo que hacía que un caso ya cerrado siguiera
+    # alertando como abierto (caso real: IM3238158). Se avisa aquí arriba, además de
+    # marcarlo fila por fila en el Explorador.
+    repetidos_plantilla = resumen_duplicados(df_completo)
+    if not repetidos_plantilla.empty:
+        st.error(
+            f"🔁 **{len(repetidos_plantilla)} caso(s) están repetidos en la plantilla** "
+            f"({int(repetidos_plantilla['VECES'].sum())} filas). Se marcan **DUPLICADO** y "
+            "quedan **fuera del semáforo y de las métricas** hasta que se unifiquen. "
+            "Detalle en **📋 Explorador de Casos & SLA**."
+        )
+
     # --- Cargar Historial SQLite ------------------------------------------
     historial, hist_tecnicos, hist_detalle, hist_resumen, hist_error = leer_historial()
 
@@ -1944,6 +2038,9 @@ def main() -> None:
                         st.session_state.pop("origen_explorador", None)
                         st.rerun()
                 df_vista = conjunto.copy()
+
+            # --- Casos repetidos: aviso y detalle, antes de los filtros ------
+            panel_duplicados(df_vista)
 
             st.subheader("🔎 Filtros avanzados de casos")
             f1, f2, f3, f4 = st.columns([2, 2, 2, 2])

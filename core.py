@@ -92,6 +92,10 @@ ROJO = "ROJO"                # vencido sin cerrar
 CERRADO_OK = "CERRADO OK"    # cerrado a tiempo  (resolucion <= vencimiento)
 CERRADO_TARDE = "CERRADO TARDE"  # incumplimiento (resolucion > vencimiento)
 SIN_VENCIMIENTO = "SIN VENCIMIENTO"  # activo sin fecha de vencimiento en la plantilla
+# Fila cuyo N° DE CASO aparece MAS DE UNA VEZ en la plantilla (duplicado).
+# No es un estado del SLA: es un problema de calidad de datos. Las filas marcadas
+# asi NO se cuentan en el semaforo ni en las metricas (ver marcar_duplicados).
+DUPLICADO = "DUPLICADO"
 
 # Orden de gravedad: primero lo que exige accion inmediata.
 ORDEN_ESTADO = {
@@ -102,6 +106,7 @@ ORDEN_ESTADO = {
     VERDE: 4,
     SIN_VENCIMIENTO: 5,
     CERRADO_OK: 6,     # cumplido: al final
+    DUPLICADO: 7,      # fila repetida: se muestra, pero fuera de los conteos
 }
 
 ICONO_ESTADO = {
@@ -112,6 +117,7 @@ ICONO_ESTADO = {
     VERDE: "🟢",
     SIN_VENCIMIENTO: "⚪",
     CERRADO_OK: "✅",
+    DUPLICADO: "🔁",
 }
 
 # Estados que requieren atencion / se notifican.
@@ -418,6 +424,126 @@ def _validar_columnas(df: pd.DataFrame) -> None:
         )
 
 
+
+# ---------------------------------------------------------------------------
+# Duplicados de la plantilla (el mismo N° DE CASO en varias filas)
+# ---------------------------------------------------------------------------
+
+# Columnas que agrega marcar_duplicados().
+COL_FILA_EXCEL = "FILA_EXCEL"
+COL_FILAS_REPETIDAS = "FILAS_REPETIDAS"
+COL_ES_DUPLICADO = "ES_DUPLICADO"
+COL_FILAS_DEL_CASO = "FILAS_DEL_CASO"
+COL_ESTADO_CALCULADO = "ESTADO_CALCULADO"
+
+
+def clave_caso(valor) -> str:
+    """
+    Clave de comparacion de un N° DE CASO.
+
+    La plantilla trae el mismo caso con espacios, saltos de linea o NBSP de mas.
+    Se normaliza (NBSP -> espacio, trim, colapso de espacios, mayusculas) para que
+    dos filas del MISMO caso se reconozcan como repetidas.
+
+    Devuelve "" cuando la celda esta vacia: una fila sin numero de caso NO cuenta
+    como duplicado (es otra cosa: fila en blanco).
+    """
+    if valor is None or pd.isna(valor):
+        return ""
+    texto = str(valor).replace("\xa0", " ").strip().upper()
+    return " ".join(texto.split())
+
+
+def marcar_duplicados(marco: pd.DataFrame, col_caso: str = COL_CASO) -> pd.DataFrame:
+    """
+    Marca las filas cuyo N° DE CASO aparece MAS DE UNA VEZ en la plantilla.
+
+    Por que existe: la plantilla real tiene casos repetidos porque alguien agrega
+    una fila nueva para registrar el cierre en vez de completar la original.
+    Caso real: IM3238158 aparece dos veces, una SIN fecha de resolucion (abierto y
+    vencido -> ROJO) y otra cerrada el 24/09 (-> CERRADO TARDE). Sin esta marca, la
+    misma fila contaba como ROJO y como CERRADO TARDE a la vez, disparaba alertas
+    de un caso ya cerrado e inflaba los conteos.
+
+    NO borra ni elige ninguna fila: solo avisa. Agrega las columnas:
+        FILA_EXCEL      -> fila que ocupa en el Excel (2 = primera fila de datos)
+        FILAS_REPETIDAS -> cuantas veces aparece ese N° DE CASO
+        ES_DUPLICADO    -> True si aparece mas de una vez
+        FILAS_DEL_CASO  -> texto con TODAS las filas Excel de ese caso repetido
+    """
+    marco = marco.copy()
+    marco[COL_FILA_EXCEL] = range(2, len(marco) + 2)
+
+    if col_caso not in marco.columns:
+        marco[COL_FILAS_REPETIDAS] = 1
+        marco[COL_ES_DUPLICADO] = False
+        marco[COL_FILAS_DEL_CASO] = ""
+        return marco
+
+    clave = marco[col_caso].apply(clave_caso)
+    conteo = clave[clave != ""].value_counts()
+    # Las filas sin numero de caso quedan en 1: no son duplicados.
+    marco[COL_FILAS_REPETIDAS] = clave.map(conteo).fillna(1).astype(int)
+    marco[COL_ES_DUPLICADO] = marco[COL_FILAS_REPETIDAS] > 1
+    marco[COL_FILAS_DEL_CASO] = clave.map(
+        {
+            cl: ", ".join(str(int(f)) for f in sorted(grupo[COL_FILA_EXCEL]))
+            for cl, grupo in marco[marco[COL_ES_DUPLICADO]].groupby(
+                clave[marco[COL_ES_DUPLICADO].index]
+            )
+        }
+    ).fillna("")
+    return marco
+
+
+def resumen_duplicados(df_completo: pd.DataFrame) -> pd.DataFrame:
+    """
+    Tabla legible de los casos repetidos, para el aviso del tablero.
+
+    Una fila por caso repetido, con sus filas del Excel y el estado que le habria
+    correspondido a cada copia (antes de marcarla DUPLICADO). Asi se ve de un golpe
+    POR QUE el caso parecia estar abierto y cerrado a la vez.
+    """
+    columnas = ["CASO", "VECES", "FILAS_EXCEL", "ESTADO_POR_FILA", "TECNICO", "VENCIMIENTO"]
+    if (df_completo is None or df_completo.empty
+            or COL_ES_DUPLICADO not in df_completo.columns):
+        return pd.DataFrame(columns=columnas)
+
+    repetidas = df_completo[df_completo[COL_ES_DUPLICADO].fillna(False).astype(bool)]
+    if repetidas.empty:
+        return pd.DataFrame(columns=columnas)
+
+    clave = repetidas[COL_CASO].apply(clave_caso)
+    filas = []
+    for cl, grupo in repetidas.groupby(clave):
+        grupo = grupo.sort_values(COL_FILA_EXCEL)
+        estados = " | ".join(
+            "fila {}: {}".format(
+                int(f[COL_FILA_EXCEL]),
+                f.get(COL_ESTADO_CALCULADO) or f.get("ESTADO") or "?",
+            )
+            for _, f in grupo.iterrows()
+        )
+        primera = grupo.iloc[0]
+        vencimiento = primera.get("FECHA_VENCIMIENTO")
+        filas.append({
+            "CASO": cl,
+            "VECES": int(len(grupo)),
+            "FILAS_EXCEL": str(primera.get(COL_FILAS_DEL_CASO, "")),
+            "ESTADO_POR_FILA": estados,
+            "TECNICO": str(primera.get("TECNICO", "") or ""),
+            "VENCIMIENTO": (
+                pd.Timestamp(vencimiento).strftime("%d/%m/%Y %H:%M")
+                if pd.notna(vencimiento) else "sin fecha"
+            ),
+        })
+    return (
+        pd.DataFrame(filas, columns=columnas)
+        .sort_values("CASO")
+        .reset_index(drop=True)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Clasificacion del semaforo
 # ---------------------------------------------------------------------------
@@ -541,13 +667,41 @@ class Resultado:
         """Conteo por estado de TODOS los casos (activos + cerrados)."""
         return self._conteo_de(self.df_completo)
 
+    def _mascara_duplicado(self) -> pd.Series:
+        """
+        True en las filas cuyo N° DE CASO esta repetido en la plantilla.
+
+        Si el DataFrame no trae la marca (por ejemplo, un resultado viejo en
+        cache), se devuelve todo False para no romper el calculo.
+        """
+        if COL_ES_DUPLICADO not in self.df_completo.columns:
+            return pd.Series(False, index=self.df_completo.index)
+        return self.df_completo[COL_ES_DUPLICADO].fillna(False).astype(bool)
+
     @property
     def conteo_activos(self) -> dict[str, int]:
-        """Conteo solo de casos ABIERTOS (excluye cerrados)."""
+        """Conteo solo de casos ABIERTOS (excluye cerrados y filas repetidas)."""
         if self.df_completo.empty:
             return {k: 0 for k in TODOS_LOS_ESTADOS}
-        abiertos = self.df_completo[~self.df_completo["CERRADO"]]
+        abiertos = self.df_completo[
+            (~self.df_completo["CERRADO"]) & (~self._mascara_duplicado())
+        ]
         return self._conteo_de(abiertos)
+
+    @property
+    def duplicados(self) -> pd.DataFrame:
+        """
+        Un renglon por caso repetido (N° DE CASO en varias filas), con sus filas del
+        Excel y el estado que le habria correspondido a cada copia.
+        """
+        return resumen_duplicados(self.df_completo)
+
+    @property
+    def df_duplicados(self) -> pd.DataFrame:
+        """TODAS las filas marcadas DUPLICADO (las copias, sin borrar ninguna)."""
+        if self.df_completo.empty or COL_ES_DUPLICADO not in self.df_completo.columns:
+            return self.df_completo
+        return self.df_completo[self._mascara_duplicado()].copy()
 
     @property
     def requieren_atencion(self) -> pd.DataFrame:
@@ -620,6 +774,13 @@ def calcular_tablero(
     # Cerrado = la columna O (fecha/hora de resolucion) tiene valor.
     marco["CERRADO"] = marco["FECHA_RESOLUCION"].notna()
 
+    # --- 2b. Duplicados de la plantilla ------------------------------------
+    # El mismo N° DE CASO en varias filas (una sin cerrar y otra ya cerrada) hacia
+    # que el caso contara A LA VEZ como abierto y como cerrado. Se marcan las copias
+    # y quedan FUERA del semaforo y de las metricas; se siguen mostrando para que
+    # alguien las unifique en el Excel.
+    marco = marcar_duplicados(marco)
+
     # --- 3. Tecnico y region ----------------------------------------------
     marco["TECNICO"] = marco[COL_TECNICO].apply(
         lambda v: " ".join(str(v).split()) if pd.notna(v) else ""
@@ -666,6 +827,11 @@ def calcular_tablero(
     estado_abierto = marco["HORAS_RESTANTES"].apply(clasificar_semaforo)
     estado_cerrado = marco["HORAS_DESVIACION_CIERRE"].apply(clasificar_cierre)
     marco["ESTADO"] = estado_abierto.where(~marco["CERRADO"], estado_cerrado)
+    # Se guarda el estado que le habria correspondido a cada fila (asi se ve si la
+    # copia estaba abierta o cerrada) y encima las repetidas pasan a DUPLICADO: se
+    # siguen viendo en el Explorador, pero no entran en el semaforo ni en las alertas.
+    marco[COL_ESTADO_CALCULADO] = marco["ESTADO"]
+    marco.loc[marco[COL_ES_DUPLICADO], "ESTADO"] = DUPLICADO
     marco["ICONO"] = marco["ESTADO"].map(ICONO_ESTADO)
     marco["TIEMPO_RESTANTE"] = marco["HORAS_RESTANTES"].apply(formatear_horas)
     marco["TIEMPO_VENCIDO"] = marco["HORAS_VENCIDO"].apply(
@@ -732,7 +898,8 @@ def calcular_tablero(
     completo = marco.reset_index(drop=True)
 
     # --- 8. Avisos de calidad de datos ------------------------------------
-    abiertos = completo[~completo["CERRADO"]]
+    # Las filas repetidas no cuentan como activas: inflarian el total de activos.
+    abiertos = completo[(~completo["CERRADO"]) & (~completo[COL_ES_DUPLICADO])]
     sin_fecha = int(abiertos["FECHA_VENCIMIENTO"].isna().sum())
     if sin_fecha:
         avisos.append(
@@ -752,6 +919,22 @@ def calcular_tablero(
         avisos.append(
             "Tecnico(s) con nombre no registrado en el diccionario de regiones: "
             + ", ".join(sin_region)
+        )
+
+    repetidos = resumen_duplicados(completo)
+    if not repetidos.empty:
+        detalle = "; ".join(
+            "{} (filas {}: {})".format(
+                fila["CASO"], fila["FILAS_EXCEL"], fila["ESTADO_POR_FILA"]
+            )
+            for _, fila in repetidos.iterrows()
+        )
+        avisos.append(
+            "{} fila(s) de {} caso(s) con el N° DE CASO repetido en la plantilla: se "
+            "marcan DUPLICADO y NO se cuentan en el semaforo ni en las metricas (hay "
+            "que unificar las filas). Detalle: {}".format(
+                int(repetidos["VECES"].sum()), len(repetidos), detalle
+            )
         )
 
     avisos.append(
@@ -799,6 +982,10 @@ def metricas_por_tecnico(df_completo: pd.DataFrame) -> pd.DataFrame:
         )
 
     m = df_completo.copy()
+    # Las filas repetidas (ver marcar_duplicados) no entran en las metricas: si no,
+    # un mismo caso se contaria dos veces a favor o en contra del tecnico.
+    if COL_ES_DUPLICADO in m.columns:
+        m = m[~m[COL_ES_DUPLICADO].fillna(False).astype(bool)]
     m["_abierto"] = ~m["CERRADO"]
 
     filas = []

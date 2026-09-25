@@ -109,6 +109,28 @@ import estilos_css
 # interrumpir al usuario mientras filtra).
 INTERVALO_AUTOREFRESCO_S = 60
 
+# SELLO DE VERSION de la interfaz. Se muestra en la barra lateral y en la linea
+# de estado: sirve para saber de un vistazo QUE version esta corriendo el
+# servidor. Si despues de un push la app sigue mostrando un sello viejo, el
+# despliegue de Streamlit Cloud no ha tomado el ultimo commit (Manage app ->
+# Reboot), no es que falte codigo en GitHub.
+VERSION_APP = "2026-09-25.1700"
+
+
+def selector_vista(opciones: list[str], defecto: str, clave: str, ayuda: str = ""):
+    """
+    Selector de una sola opcion (Todas / Bogota / Regionales).
+
+    Usa el componente segmentado de Streamlit cuando existe y, si el servidor
+    tuviera una version antigua que no lo trae, cae a un radio horizontal: asi la
+    pantalla funciona en cualquier version desplegada.
+    """
+    creador = getattr(st, "segmented_control", None)
+    if creador is not None:
+        return creador("Vista", opciones, default=defecto, key=clave, help=ayuda) or defecto
+    return st.radio("Vista", opciones, index=opciones.index(defecto),
+                    horizontal=True, key=clave, help=ayuda)
+
 
 def dibujar_graficos_altair(filtrado: pd.DataFrame) -> None:
     """Dibuja gráficos interactivos de casos por región y técnico con la paleta semántica SLA."""
@@ -1810,6 +1832,11 @@ def main() -> None:
             )
             st.caption(AYUDA_ESTADO[estado])
         st.divider()
+        st.caption(f"🛠️ **Versión del tablero:** `{VERSION_APP}`")
+        st.caption(
+            "Si después de una actualización sigue viendo una versión anterior, "
+            "el servidor no ha tomado el último cambio: *Manage app* → ⋮ → **Reboot**."
+        )
 
     # --- Localización del archivo o subida manual -------------------------
     momento = ahora_colombia()
@@ -1933,7 +1960,8 @@ def main() -> None:
         f"📄 `{os.path.basename(ruta)}` · "
         f"Cálculo: **{momento:%Y-%m-%d %H:%M:%S}** · "
         f"Filas: **{total_hoja}** · Activos: **{total_activos}** · "
-        f"En ventana: **{len(df)}** · {badge_modo}",
+        f"En ventana: **{len(df)}** · {badge_modo} · "
+        f"<span class='badge-timestamp'>🛠️ v{VERSION_APP}</span>",
         unsafe_allow_html=True,
     )
 
@@ -2012,13 +2040,12 @@ def main() -> None:
             # No reemplaza los filtros de arriba: es el corte Bogota / Regionales
             # que la torre usa para reportarle a cada coordinadora.
             reparto_completo = parte_por_region(df_completo)
-            lente = st.segmented_control(
-                "Vista por coordinación",
+            lente = selector_vista(
                 ["Todas", "🏢 Bogotá", "🌎 Regionales"],
-                default="Todas",
-                key="lente_turno",
-                help="Muestra solo los casos que le corresponden a cada coordinación.",
-            ) or "Todas"
+                "Todas",
+                "lente_turno",
+                "Muestra solo los casos que le corresponden a cada coordinación.",
+            )
             if lente.endswith("Bogotá"):
                 base = reparto_completo[BOGOTA]
             elif lente.endswith("Regionales"):

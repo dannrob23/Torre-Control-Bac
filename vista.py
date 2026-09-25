@@ -44,9 +44,6 @@ from core import (
     VERDE,
 )
 
-# Cruce del Plan de Trabajo con la plantilla SLA (ver conciliacion.py).
-import conciliacion
-
 # ---------------------------------------------------------------------------
 # Colores (mismos del dashboard, para no romper la identidad visual)
 # ---------------------------------------------------------------------------
@@ -789,6 +786,24 @@ def render_conciliacion(df_completo: pd.DataFrame, plan_bytes) -> None:
 
     No decide nada: avisa, y deja a la vista la nota manual del plan.
     """
+    # Import LOCAL a proposito: si el servidor quedo con un conciliacion.py viejo
+    # (o sin el archivo), el fallo se ve aqui dentro y se explica, en vez de tumbar
+    # TODO el tablero al importar este modulo.
+    try:
+        import conciliacion
+    except Exception as exc:
+        st.error(
+            "❌ **El servidor no tiene el módulo `conciliacion.py` actualizado.** "
+            "Es un problema de caché del servidor, no del archivo que subiste.",
+            icon="🧩",
+        )
+        st.code(f"{type(exc).__name__}: {exc}")
+        st.caption(
+            "Solución: en Streamlit Cloud, *Manage app* → menú ⋮ → **Reboot**. "
+            "Si sigue igual, *Delete app* y vuelve a desplegar (limpia la caché)."
+        )
+        return
+
     st.subheader("🔀 Conciliación con la plantilla SLA")
     st.caption(
         "Cruza el Plan de Trabajo con la plantilla de seguimiento por N° DE CASO y "
@@ -813,6 +828,14 @@ def render_conciliacion(df_completo: pd.DataFrame, plan_bytes) -> None:
             st.error("❌ No se pudieron cruzar los dos archivos.")
             st.code(f"{type(exc).__name__}: {exc}")
             return
+
+    # Avisos del cruce: por ejemplo, si el servidor quedo con un plan.py viejo y
+    # no se pudieron leer las notas manuales de las hojas diarias.
+    for aviso in cruce.get("avisos") or []:
+        if aviso.get("nivel") == "info":
+            st.info(f"ℹ️ {aviso['texto']}")
+        else:
+            st.warning(f"⚠️ {aviso['texto']}", icon="⚠️")
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Casos en el plan", cruce["total_plan"])

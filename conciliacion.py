@@ -223,24 +223,57 @@ def _vacio(columnas: list[str]) -> pd.DataFrame:
     return pd.DataFrame(columns=columnas)
 
 
-def _plan_manual(plan_bytes) -> pd.DataFrame:
-    """Notas de las hojas diarias: un renglon por caso, con la nota mas reciente."""
+def _plan_manual(plan_bytes) -> tuple[pd.DataFrame, dict | None]:
+    """
+    Notas de las hojas diarias: un renglon por caso, con la nota mas reciente.
+
+    Devuelve ``(marco, aviso)``. El aviso explica cuando NO se pudieron leer las
+    notas manuales, para no entregar un cruce incompleto en silencio.
+    """
     columnas = ["CLAVE", P_HOJA, P_FECHA_HOJA, P_APERTURA, P_VENCE, P_ASIGNATARIO,
                 P_UBICACION, P_NOTA, P_NOTA_NORM, P_NOTAS, P_ESTADO]
+
+    # El servidor puede quedar con una version vieja de plan.py en cache (ha pasado
+    # antes): sin leer_manual_plan no hay notas manuales que mostrar.
+    if not hasattr(plan, "leer_manual_plan"):
+        return _vacio(columnas), {
+            "nivel": "warning",
+            "texto": (
+                "El servidor tiene una versión antigua de `plan.py`: **no se pudieron "
+                "leer las notas manuales (columna I) de las hojas diarias**, así que el "
+                "cruce solo usa la hoja `Casos_Ven`. En Streamlit Cloud, *Manage app* → "
+                "menú ⋮ → **Reboot**."
+            ),
+        }
+
     try:
         manual = plan.leer_manual_plan(plan_bytes)
-    except Exception:
-        # Un plan sin hojas diarias sigue sirviendo: queda solo Casos_Ven.
-        return _vacio(columnas)
+    except Exception as exc:
+        # ErrorPlan = el plan no trae hojas diarias: se cruza solo Casos_Ven.
+        if isinstance(exc, plan.ErrorPlan):
+            return _vacio(columnas), {
+                "nivel": "info",
+                "texto": (
+                    "El Plan de Trabajo no trae hojas diarias: el cruce se hizo solo "
+                    "con la hoja `Casos_Ven`."
+                ),
+            }
+        return _vacio(columnas), {
+            "nivel": "warning",
+            "texto": (
+                "No se pudieron leer las notas manuales de las hojas diarias del plan "
+                f"({type(exc).__name__}: {exc}). El cruce solo usa `Casos_Ven`."
+            ),
+        }
 
     if manual is None or manual.empty:
-        return _vacio(columnas)
+        return _vacio(columnas), None
 
     manual = manual.copy()
     manual["CLAVE"] = manual[plan.COL_ID_DIARIO].map(core.clave_caso)
     manual = manual[manual["CLAVE"].ne("")]
     if manual.empty:
-        return _vacio(columnas)
+        return _vacio(columnas), None
 
     manual = manual.sort_values(["CLAVE", "FECHA_HOJA"])
     # .last() toma, columna por columna, el ultimo valor NO nulo del caso: asi la
@@ -269,7 +302,7 @@ def _plan_manual(plan_bytes) -> pd.DataFrame:
     })
     for col in (P_HOJA, P_ASIGNATARIO, P_UBICACION, P_NOTA, P_NOTA_NORM, P_NOTAS, P_ESTADO):
         salida[col] = salida[col].map(_texto)
-    return salida
+    return salida, None
 
 
 def _plan_vencidos(plan_bytes) -> pd.DataFrame:
@@ -367,7 +400,10 @@ def conciliar(
         resumen      tabla ``Tipo | Casos | Qué significa`` en orden de gravedad.
         total_plan, total_plantilla, coinciden, desajustes, columnas
     """
-    manual = _plan_manual(plan_bytes)
+    avisos: list[dict] = []
+    manual, aviso_manual = _plan_manual(plan_bytes)
+    if aviso_manual:
+        avisos.append(aviso_manual)
     vencidos = _plan_vencidos(plan_bytes)
     plantilla = _plantilla(df_plantilla)
 
@@ -380,6 +416,7 @@ def conciliar(
         "coinciden": 0,
         "desajustes": 0,
         "columnas": COLUMNAS_TABLA,
+        "avisos": avisos,
     }
 
     if manual.empty and vencidos.empty and plantilla.empty:
@@ -502,4 +539,5 @@ def conciliar(
         "coinciden": int(len(tabla) - sum(1 for t in tipos_por_fila if t)),
         "desajustes": int(sum(1 for t in tipos_por_fila if t)),
         "columnas": COLUMNAS_TABLA,
+        "avisos": avisos,
     }

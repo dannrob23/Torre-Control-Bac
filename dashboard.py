@@ -84,9 +84,12 @@ import auth
 # barra de semaforo segmentada y listas de accion.
 import vista
 
-# El panel de conciliacion se importa por nombre: dentro de render_plan_trabajo()
-# la variable local "vista" guarda la lectura del plan, y taparia al modulo.
-from vista import render_conciliacion
+# Alias del modulo vista. Hace falta porque dentro de render_plan_trabajo() la
+# variable local "vista" guarda la lectura del plan y taparia al modulo. Ademas
+# se resuelve el panel con getattr (ver _dibujar_conciliacion): si el servidor
+# quedo con un vista.py viejo en cache, se avisa en la pestana en vez de tumbar
+# TODO el tablero con un ImportError al arrancar.
+vista_panel = vista
 
 # Analitica del Plan de Trabajo mensual (cartera vencida, envejecimiento y ANS).
 # Es independiente de la plantilla SLA: trabaja sobre otro archivo.
@@ -1452,6 +1455,27 @@ def normalizar_generico(valor) -> str:
 # respondian a otra pregunta ("que habia abierto ese dia") y confundian la
 # lectura: el usuario espera ver su hoja, con sus 145 filas.
 
+def _dibujar_conciliacion(df_completo, plan_bytes) -> None:
+    """
+    Dibuja el panel de conciliacion si el modulo vista lo trae.
+
+    El servidor de Streamlit Cloud puede quedar con una version vieja de un modulo
+    en cache (ya paso con plan.py). Si eso ocurre, se avisa con la solucion en vez
+    de tumbar todo el tablero con un ImportError: la conciliacion es UNA seccion de
+    UNA pestana, no el tablero entero.
+    """
+    dibujar = getattr(vista_panel, "render_conciliacion", None)
+    if dibujar is None:
+        st.warning(
+            "⚠️ **El servidor tiene una versión antigua de `vista.py`**: falta el "
+            "panel de conciliación. En Streamlit Cloud, *Manage app* → menú ⋮ → "
+            "**Reboot**; si sigue igual, *Delete app* y vuelve a desplegar.",
+            icon="🧩",
+        )
+        return
+    dibujar(df_completo, plan_bytes)
+
+
 def render_plan_trabajo(df_completo: pd.DataFrame | None = None) -> None:
     """
     Pestaña del Plan de Trabajo: todo el contenido de la hoja Casos_Ven.
@@ -1586,7 +1610,7 @@ def render_plan_trabajo(df_completo: pd.DataFrame | None = None) -> None:
     # --- Conciliacion con la plantilla SLA --------------------------------
     # Cruza los dos archivos y muestra donde se contradicen (conciliacion.py).
     st.divider()
-    render_conciliacion(df_completo, contenido)
+    _dibujar_conciliacion(df_completo, contenido)
 
     # --- Detalle ----------------------------------------------------------
     st.markdown("##### 📋 Detalle caso a caso")

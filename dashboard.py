@@ -36,6 +36,7 @@ import streamlit as st
 
 from core import (
     AMARILLO,
+    BOGOTA,
     CERRADO_OK,
     CERRADO_TARDE,
     COL_CASO,
@@ -51,6 +52,7 @@ from core import (
     ICONO_ESTADO,
     NARANJA,
     ORDEN_ESTADO,
+    REGIONALES,
     REGION_DESCONOCIDA,
     ROJO,
     SIN_VENCIMIENTO,
@@ -62,6 +64,7 @@ from core import (
     leer_casos,
     localizar_excel,
     metricas_por_tecnico,
+    parte_por_region,
     resumen_duplicados,
 )
 from historial import (
@@ -94,6 +97,10 @@ vista_panel = vista
 # Analitica del Plan de Trabajo mensual (cartera vencida, envejecimiento y ANS).
 # Es independiente de la plantilla SLA: trabaja sobre otro archivo.
 import plan
+
+# Calculos del turno: avance del dia, acumulado del mes y grupos de alerta en el
+# orden de atencion de la torre (naranja, amarillo, rojo, proximos 3 dias).
+import turno
 
 # Sistema de diseño CSS personalizado
 import estilos_css
@@ -1983,12 +1990,13 @@ def main() -> None:
     # NAVEGACIÓN PRINCIPAL EN PESTAÑAS (ST.TABS)
     # =====================================================================
     (tab_despacho, tab_explorador, tab_analitica, tab_historial,
-     tab_plan, tab_integridad) = st.tabs([
+     tab_plan, tab_validacion, tab_integridad) = st.tabs([
         "🎯 Despacho Operativo",
         "📋 Explorador de Casos & SLA",
         "📊 Analítica & Técnicos",
         "📜 Historial & Auditoría",
         "🗂️ Plan de Trabajo & ANS",
+        "⚖️ Validación de datos",
         "🔍 Integridad de datos",
     ])
 
@@ -2000,43 +2008,106 @@ def main() -> None:
             control = vista.barra_control(df_completo, df, momento)
             df_vista = control["datos"]
 
+            # --- Lente por coordinacion: cambia TODO el turno ----------------
+            # No reemplaza los filtros de arriba: es el corte Bogota / Regionales
+            # que la torre usa para reportarle a cada coordinadora.
+            reparto_completo = parte_por_region(df_completo)
+            lente = st.segmented_control(
+                "Vista por coordinación",
+                ["Todas", "🏢 Bogotá", "🌎 Regionales"],
+                default="Todas",
+                key="lente_turno",
+                help="Muestra solo los casos que le corresponden a cada coordinación.",
+            ) or "Todas"
+            if lente.endswith("Bogotá"):
+                base = reparto_completo[BOGOTA]
+            elif lente.endswith("Regionales"):
+                base = reparto_completo[REGIONALES]
+            else:
+                base = df_completo
+
+            def _reparto(marco) -> tuple[int, int]:
+                """(casos de Bogota, casos de Regionales) de una lista."""
+                if marco is None or marco.empty or "REGION_TECNICO" not in marco.columns:
+                    return (0, 0)
+                es_bogota = (
+                    marco["REGION_TECNICO"].astype(str).str.strip().str.upper() == BOGOTA
+                )
+                return (int(es_bogota.sum()), int((~es_bogota).sum()))
+
             st.divider()
 
-            # Franja de Foco KPI Cards
-            listas = vista.construir_listas(df_completo, momento)
-            vista.franja_foco(
-                listas["n_vencidos"],
-                listas["n_vencen_hoy"],
-                listas["n_proximos_3d"],
-                total_completo,
+            # --- Los dos bloques: avance de hoy y acumulado del mes ---------
+            # La culpa documentada sale del Plan de Trabajo (si esta cargado).
+            plan_bytes_turno = st.session_state.get("plan_bytes")
+            culpa_turno = (
+                turno.culpa_por_caso(plan_bytes_turno) if plan_bytes_turno else {}
             )
+            resumen_turno = turno.avance_y_acumulado(base, momento, culpa_turno)
+            vista.bloques_turno(resumen_turno)
 
             st.markdown("##### 🚦 Reparto del semáforo (todos los casos)")
             vista.barra_semaforo(conteo_completo, total_completo)
 
             st.divider()
-
-            # Listas de acción priorizadas con popovers flotantes contextualmente
-            vista.lista_accion(
-                listas["vencen_hoy"],
-                "⏰ Vencen en las próximas 24 h — última oportunidad",
-                "Del más urgente al menos urgente. Todavía se pueden salvar. Presiona '📨 Avisar' para notificar inmediatamente.",
-                "✅ Ningún caso vence en las próximas 24 horas.",
-                "accion_hoy",
-                tecnicos_notificables=tecnicos_notificables,
-                df_completo=df_completo,
-                historial=historial,
+            st.caption(
+                "**Orden de atención:** primero lo que todavía se puede salvar "
+                "(🟠 y 🟡) y de último los ya vencidos (🔴), que no dependen de una "
+                "acción del turno de hoy."
             )
+
+            # --- Los 4 grupos, completos y en el orden pedido ---------------
+            grupos_turno = turno.grupos_alerta(base)
+            definicion = (
+                (turno.GRUPO_INMINENTE, "1️⃣ 🟠 Se vencen en menos de 1 hora",
+                 "Emergencia del turno: se atienden primero.",
+                 "✅ Nada se vence en la próxima hora.", "turno_inm1h"),
+                (turno.GRUPO_PREVENTIVO, "2️⃣ 🟡 Se vencen entre 1 y 4 horas",
+                 "Todavía hay margen para gestionarlos.",
+                 "✅ Nada se vence entre 1 y 4 horas.", "turno_prev4h"),
+                (turno.GRUPO_VENCIDOS, "3️⃣ 🔴 Ya vencidos",
+                 "El más atrasado primero: ya no dependen de una acción de hoy.",
+                 "✅ No hay casos vencidos sin cerrar.", "turno_vencidos"),
+                (turno.GRUPO_PROXIMOS, "4️⃣ 📅 Próximos 3 días",
+                 "Aún se pueden salvar, pero sin la urgencia del turno.",
+                 "✅ No hay casos que venzan en los próximos 3 días.", "turno_prox3d"),
+            )
+            for clave, titulo, subtitulo, vacio, clave_ui in definicion:
+                marco = grupos_turno[clave]
+                vista.lista_accion(
+                    marco,
+                    titulo,
+                    subtitulo,
+                    vacio,
+                    clave_ui,
+                    tecnicos_notificables=tecnicos_notificables,
+                    df_completo=df_completo,
+                    historial=historial,
+                    reparto=_reparto(marco),
+                )
+                st.divider()
+
+            # Contexto: lo que no es alerta del turno, pero existe y se cuenta
+            # para que ningun caso quede invisible.
+            mas_adelante = len(grupos_turno[turno.GRUPO_MAS_ADELANTE])
+            sin_fecha = len(grupos_turno[turno.GRUPO_SIN_FECHA])
+            abiertos_base = int((~base["CERRADO"]).sum()) if not base.empty else 0
+            st.caption(
+                f"Contexto: **{mas_adelante}** caso(s) vencen a más de 3 días y "
+                f"**{sin_fecha}** no tienen fecha en la plantilla. Con los 4 grupos "
+                f"suman los **{abiertos_base}** casos abiertos: nada queda oculto."
+            )
+
+            # --- Cierre del dia para cada coordinacion ----------------------
             st.divider()
-            vista.lista_accion(
-                listas["vencidos"],
-                "🚨 Ya vencidos — el más atrasado primero",
-                "Sin resolver desde hace más tiempo. Requieren acción inmediata.",
-                "✅ No hay casos vencidos sin cerrar.",
-                "accion_vencidos",
-                tecnicos_notificables=tecnicos_notificables,
-                df_completo=df_completo,
-                historial=historial,
+            vencidos_region = {
+                BOGOTA: turno.grupos_alerta(reparto_completo[BOGOTA])[turno.GRUPO_VENCIDOS],
+                REGIONALES: turno.grupos_alerta(
+                    reparto_completo[REGIONALES]
+                )[turno.GRUPO_VENCIDOS],
+            }
+            vista.cierre_del_dia(
+                reparto_completo, momento, culpa_turno, vencidos_region
             )
 
         # ---------------------------------------------------------------------
@@ -2230,7 +2301,16 @@ def main() -> None:
         render_plan_trabajo(df_completo)
 
     # ---------------------------------------------------------------------
-    # PESTANA 6: INTEGRIDAD DE DATOS
+    # PESTANA 6: VALIDACION DE DATOS (modulo aparte)
+    # ---------------------------------------------------------------------
+    # Los chequeos son los MISMOS que ya existian (fechas, nombres, repetidos y
+    # causa documentada). Viven en su propio modulo para que la pantalla de turno
+    # no tenga que bajar por toda la pagina para atender.
+    with tab_validacion:
+        vista.render_validacion(df_completo)
+
+    # ---------------------------------------------------------------------
+    # PESTANA 7: INTEGRIDAD DE DATOS (auditoria de filas: sigue igual)
     # ---------------------------------------------------------------------
     with tab_integridad:
         render_integridad(df_crudo, df_completo, nombre_archivo)

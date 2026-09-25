@@ -504,9 +504,14 @@ def lista_accion(
     tecnicos_notificables: set[str] | None = None,
     df_completo: pd.DataFrame | None = None,
     historial=None,
+    reparto: tuple[int, int] | None = None,
 ) -> None:
     """
     Dibuja una lista de casos con boton popover flotante para avisar en la misma fila.
+
+    ``reparto`` es (casos de Bogota, casos de Regionales) de ESTA lista: se muestra
+    como dos etiquetas en el encabezado, para que la torre vea de un golpe que le
+    toca a cada coordinacion sin tener que filtrar.
     """
     import avisos
     import telegram_notifier
@@ -518,10 +523,20 @@ def lista_accion(
 
     # --- Encabezado con el TOTAL real, sin truncados silenciosos -----------
     n_total = len(df)
+    etiquetas = ""
+    if reparto:
+        bogota, regionales = reparto
+        etiquetas = (
+            f"<span class='chip-turno' style='background:#EFF6FF;color:#1E40AF'>"
+            f"🏢 Bogotá {bogota}</span>"
+            f"<span class='chip-turno' style='background:#F0FDF4;color:#15803D'>"
+            f"🌎 Regionales {regionales}</span>"
+        )
     st.markdown(
         f"<div class='encabezado-lista'>"
         f"<span style='font-size:17px;font-weight:700;'>{titulo}</span>"
         f"<span class='conteo-total'>{n_total} caso{'s' if n_total != 1 else ''}</span>"
+        f"{etiquetas}"
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -913,3 +928,280 @@ def render_conciliacion(df_completo: pd.DataFrame, plan_bytes) -> None:
         "**Plan: Justificación** = justificación de la hoja `Casos_Ven`. "
         "Cuando los dos archivos chocan, manda la nota manual."
     )
+
+
+# ---------------------------------------------------------------------------
+# Modulo aparte: VALIDACION DE DATOS
+# ---------------------------------------------------------------------------
+
+def render_validacion(df_completo) -> None:
+    """
+    Modulo de validacion de datos: los 4 chequeos con la FILA EXACTA del Excel.
+
+    Los chequeos NO se cambian: son los mismos que ya existian en el sistema
+    (fechas contra el plan, nombres de tecnico, casos repetidos y causa
+    documentada). Lo que se gana es tenerlos juntos, en su propio modulo, con el
+    conteo arriba y la fila donde esta el problema.
+    """
+    # Import LOCAL: si el servidor quedo con un validacion.py viejo (o sin el
+    # archivo), se explica en la pestana en vez de tumbar el tablero entero.
+    try:
+        import validacion
+    except Exception as exc:
+        st.error(
+            "❌ **El servidor no tiene el módulo `validacion.py` actualizado.** Es un "
+            "problema de caché del servidor, no del archivo que subiste.",
+            icon="🧩",
+        )
+        st.code(f"{type(exc).__name__}: {exc}")
+        st.caption(
+            "Solución: en Streamlit Cloud, *Manage app* → menú ⋮ → **Reboot**."
+        )
+        return
+
+    st.subheader("⚖️ Validación de datos")
+    st.caption(
+        "Le dice a la torre **en qué fila está el problema**, contrastando la "
+        "plantilla del banco con el Plan de Trabajo. Esta pestaña **audita el dato** "
+        "(¿está bien escrito?); *🔍 Integridad de datos* audita las **filas** "
+        "(¿llegaron todas?). Nada de lo que ya existía se quitó."
+    )
+
+    plan_bytes = st.session_state.get("plan_bytes")
+    if not plan_bytes:
+        st.info(
+            "Suba el **Plan de Trabajo** (barra lateral → *Cargar archivo*) para "
+            "contrastar los dos archivos: el chequeo de fechas y el de causa lo usan."
+        )
+
+    with st.spinner("Corriendo los chequeos..."):
+        try:
+            info = validacion.chequeos(plan_bytes, df_completo)
+        except Exception as exc:
+            st.error("❌ No se pudieron correr los chequeos.")
+            st.code(f"{type(exc).__name__}: {exc}")
+            return
+
+    # --- Los 4 chequeos, de un golpe --------------------------------------
+    columnas = st.columns(len(info["chequeos"]))
+    for columna, chequeo in zip(columnas, info["chequeos"]):
+        with columna:
+            st.metric(
+                f"{chequeo['icono']} {chequeo['titulo']}",
+                chequeo["alerta"] if chequeo["alerta"] else "OK",
+                delta="revisar" if chequeo["alerta"] else None,
+                delta_color="inverse" if chequeo["alerta"] else "off",
+                help=chequeo["ayuda"],
+            )
+
+    if info["pendientes"]:
+        st.warning(
+            f"**{info['pendientes']} de {info['total']}** chequeos tienen algo que "
+            "corregir. Cada tabla dice el caso **y la fila exacta** donde está así, "
+            "con su CSV para trabajarla en Excel.",
+            icon="⚠️",
+        )
+    else:
+        st.success("✅ Todo cuadra: no hay nada que corregir en los datos.", icon="✅")
+
+    st.divider()
+
+    # --- Un tab por chequeo (sin scroll) ----------------------------------
+    etiquetas = [
+        f"{chequeo['icono']} {chequeo['titulo']}"
+        + (f" · {chequeo['alerta']}" if chequeo["alerta"] else " · OK")
+        for chequeo in info["chequeos"]
+    ]
+    for pestana, chequeo in zip(st.tabs(etiquetas), info["chequeos"]):
+        with pestana:
+            st.markdown(chequeo["resumen"])
+            st.caption(chequeo["ayuda"])
+            tabla = chequeo["tabla"]
+            if tabla is None or tabla.empty:
+                st.info("✅ Nada que corregir en este chequeo.")
+                continue
+            st.dataframe(
+                tabla,
+                width="stretch",
+                hide_index=True,
+                height=min(430, 60 + 35 * len(tabla)),
+                key=f"validacion_{chequeo['id']}",
+            )
+            st.download_button(
+                f"⬇️ Descargar los {len(tabla)} (CSV)",
+                data=tabla.to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"validacion_{chequeo['id']}.csv",
+                mime="text/csv",
+                key=f"csv_validacion_{chequeo['id']}",
+            )
+
+
+# ---------------------------------------------------------------------------
+# Turno: los dos bloques (avance de hoy y acumulado del mes)
+# ---------------------------------------------------------------------------
+
+def _dato_turno(etiqueta: str, valor) -> str:
+    return f"<div class='dato-turno'><span>{etiqueta}</span><b>{valor}</b></div>"
+
+
+def bloques_turno(resumen: dict) -> None:
+    """
+    Los dos bloques de la pantalla de turno, con el cumplimiento del mes.
+
+    A la izquierda lo del dia (lo que se reporta como "avance") y a la derecha el
+    acumulado del mes, que es lo que piden las coordinadoras.
+    """
+    hoy, mes = resumen["hoy"], resumen["mes"]
+    pct = float(mes.get("pct") or 0.0)
+    color = (
+        COLOR_SEMAFORO[VERDE] if pct >= 90
+        else COLOR_SEMAFORO[AMARILLO] if pct >= 70
+        else COLOR_SEMAFORO[ROJO]
+    )
+
+    filas_hoy = "".join([
+        _dato_turno("Recibidos hoy", hoy["recibidos"]),
+        _dato_turno("Cerrados hoy", hoy["cerrados"]),
+        _dato_turno("— a tiempo", hoy["a_tiempo"]),
+        _dato_turno("— con incumplimiento", hoy["tarde"]),
+        _dato_turno("Pendientes", hoy["pendientes"]),
+        _dato_turno("Vencidos abiertos", hoy["vencidos"]),
+    ])
+    filas_mes = "".join([
+        _dato_turno("Asignados", mes["asignados"]),
+        _dato_turno("Cerrados", mes["cerrados"]),
+        _dato_turno("— con incumplimiento", mes["tarde"]),
+    ])
+    extra = ""
+    if mes.get("pct_atribuible") is not None:
+        extra = (
+            _dato_turno("% atribuible al técnico", f"{mes['pct_atribuible']} %")
+            + "<div style='font-size:11.5px;color:#6B7280'>sobre "
+            f"{mes['documentados']} casos con causa escrita en el plan</div>"
+        )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(
+            f"<div class='bloque-turno'><h4>✅ Avance de hoy</h4>{filas_hoy}</div>",
+            unsafe_allow_html=True,
+        )
+    with c2:
+        st.markdown(
+            f"<div class='bloque-turno'><h4>📈 Acumulado del mes</h4>{filas_mes}{extra}"
+            f"<div style='margin-top:9px'><div class='barra-turno'>"
+            f"<span style='width:{pct:.1f}%;background:{color}'></span></div></div>"
+            f"<div style='font-size:12px;margin-top:5px'>Cumplimiento "
+            f"<b>{pct}%</b></div></div>",
+            unsafe_allow_html=True,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Turno: cierre del dia para cada coordinacion
+# ---------------------------------------------------------------------------
+
+def cierre_del_dia(partes: dict, corte, culpa: dict | None = None,
+                   vencidos_por_region: dict | None = None) -> None:
+    """
+    Genera y envia el cierre del dia, un mensaje por coordinacion.
+
+    El envio respeta el filtro de region de cada destino configurado (Bogota /
+    Regionales / todos), que es como la torre distribuye hoy los avisos: cada
+    coordinadora recibe SOLO lo suyo.
+    """
+    import telegram_notifier
+    import turno
+
+    st.markdown("#### 📤 Cierre del día")
+    st.caption(
+        "El mensaje que recibe cada coordinación: avance del día + acumulado del mes "
+        "por técnico. El envío respeta el **filtro de región** de cada destino."
+    )
+    if not st.button("🧾 Generar el cierre del día", type="primary", key="btn_cierre_generar"):
+        if not st.session_state.get("cierre_listo"):
+            return
+
+    fecha = pd.Timestamp(corte).strftime("%d/%m/%Y")
+    mensajes: dict[str, str] = {}
+    for nombre in ("BOGOTA", "REGIONALES"):
+        sub = partes.get(nombre)
+        if sub is None or sub.empty:
+            continue
+        resumen = turno.avance_y_acumulado(sub, corte, culpa)
+        vencidos = (vencidos_por_region or {}).get(nombre)
+        if vencidos is None:
+            vencidos = turno.grupos_alerta(sub)[turno.GRUPO_VENCIDOS]
+        mensajes[nombre] = turno.mensaje_cierre(
+            "BOGOTÁ" if nombre == "BOGOTA" else "REGIONALES",
+            resumen, turno.por_tecnico(sub, culpa), vencidos, fecha,
+        )
+
+    if not mensajes:
+        st.warning("No hay casos para cerrar el día.")
+        return
+    st.session_state["cierre_listo"] = True
+
+    columnas = st.columns(len(mensajes))
+    for columna, (nombre, texto) in zip(columnas, mensajes.items()):
+        titulo = "🏢 BOGOTÁ" if nombre == "BOGOTA" else "🌎 REGIONALES"
+        with columna:
+            st.markdown(f"**{titulo}**")
+            st.code(texto, language=None)
+            st.download_button(
+                f"⬇️ Descargar cierre {titulo.split()[-1].title()} (.txt)",
+                data=texto.encode("utf-8"),
+                file_name=f"cierre_{nombre.lower()}_{pd.Timestamp(corte):%Y%m%d}.txt",
+                mime="text/plain",
+                key=f"descarga_cierre_{nombre}",
+            )
+
+    st.divider()
+    try:
+        destinos = telegram_notifier.destinos_configurados()
+    except Exception as exc:
+        destinos = []
+        st.warning(f"No se pudieron leer los destinos de Telegram: {exc}")
+
+    if not destinos:
+        st.info(
+            "No hay destinos de Telegram configurados: usa los botones de descarga y "
+            "envía los mensajes a mano. (Ver `docs/TUTORIAL_TELEGRAM.md`.)"
+        )
+        return
+
+    resumen_destinos = " · ".join(
+        f"{d.get('nombre') or 'grupo'} [{d.get('filtro') or 'todo'}]" for d in destinos
+    )
+    st.caption(f"Destinos configurados: {resumen_destinos}")
+
+    if st.button(f"🚀 Enviar a Telegram ({len(destinos)} destino(s))", key="btn_cierre_enviar"):
+        enviados = 0
+        for destino in destinos:
+            filtro = str(destino.get("filtro") or "todo").lower()
+            if filtro == "bogota":
+                textos = [mensajes.get("BOGOTA", "")]
+            elif filtro == "regionales":
+                textos = [mensajes.get("REGIONALES", "")]
+            else:
+                textos = [mensajes.get("BOGOTA", ""), mensajes.get("REGIONALES", "")]
+
+            for texto in textos:
+                if not texto:
+                    continue
+                if telegram_notifier.enviar_mensaje(
+                    texto,
+                    parse_mode="HTML",
+                    chat_id=destino.get("chat_id"),
+                    tema_id=destino.get("tema_id") or None,
+                    silencioso=True,
+                ):
+                    enviados += 1
+                    st.caption(f"✅ Enviado a {destino.get('nombre') or 'grupo'}")
+                else:
+                    st.warning(f"❌ Falló el envío a {destino.get('nombre') or 'grupo'}")
+
+        if enviados:
+            st.success(f"✅ Cierre del día enviado ({enviados} mensaje(s)).")
+        else:
+            st.error("❌ Telegram no aceptó ningún mensaje. Revise credenciales y conexión.")

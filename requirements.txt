@@ -16,7 +16,12 @@ openpyxl>=3.1,<4.0
 requests>=2.31
 
 # --- DASHBOARD WEB ---
-streamlit>=1.30
+# Se exige 1.40+ porque el tablero usa componentes que no existen antes:
+#   st.segmented_control (selector de vista por coordinacion),
+#   st.popover, st.dataframe(selection_mode=...) y st.metric(help=...).
+# Sin el piso de version, un despliegue que resolviera una version vieja
+# romperia la interfaz sin que nadie tocara el codigo.
+streamlit>=1.40,<2
 
 # --- CONTROL DE ACCESO (OBLIGATORIO) ---
 # El tablero exige usuario y contrasena antes de mostrar nada (auth.py).

@@ -217,6 +217,47 @@ button[kind="primary"]:hover {
     border-radius: 20px;
     border: 1px solid #BAE6FD;
 }
+
+/* --- Bloques del turno: avance de hoy y acumulado del mes ---------------- */
+.bloque-turno {
+    border: 1px solid #E5E7EB;
+    border-radius: 12px;
+    padding: 13px 17px;
+    background: #FFFFFF;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+    height: 100%;
+}
+.bloque-turno h4 {
+    margin: 0 0 9px 0;
+    font-size: 11.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #6B7280;
+    font-weight: 700;
+}
+.dato-turno {
+    display: flex;
+    justify-content: space-between;
+    font-size: 14px;
+    padding: 3px 0;
+    border-bottom: 1px dashed #F1F5F9;
+}
+.dato-turno b { font-variant-numeric: tabular-nums; }
+.barra-turno {
+    height: 9px;
+    border-radius: 999px;
+    background: #E5E7EB;
+    overflow: hidden;
+}
+.barra-turno span { display: block; height: 100%; }
+.chip-turno {
+    display: inline-block;
+    border-radius: 6px;
+    padding: 1px 7px;
+    font-size: 11.5px;
+    font-weight: 700;
+    margin-left: 6px;
+}
 </style>
 """
 

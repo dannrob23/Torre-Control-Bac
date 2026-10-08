@@ -105,11 +105,14 @@ TOLERANCIA_MODELO_DIAS = 7.0
 def normalizar(valor) -> str:
     """
     Normaliza texto para comparar nombres y categorias:
-    trim (incluye NBSP), colapsa espacios, quita tildes y pasa a mayusculas.
+    trim (incluye NBSP), colapsa espacios, quita tildes, pasa a mayusculas
+    y trata guiones y guiones bajos como separadores.
     """
     if valor is None or (isinstance(valor, float) and pd.isna(valor)):
         return ""
     texto = str(valor).replace("\xa0", " ").strip()
+    # Tratar guiones y guiones bajos como separadores de palabras
+    texto = texto.replace("-", " ").replace("_", " ")
     texto = unicodedata.normalize("NFKD", texto)
     texto = "".join(c for c in texto if not unicodedata.combining(c))
     return " ".join(texto.upper().split())

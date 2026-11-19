@@ -61,9 +61,7 @@ from core import (
     ErrorLecturaExcel,
     ahora_colombia,
     calcular_tablero,
-    leer_casos,
     leer_export_csv,
-    localizar_excel,
     metricas_por_tecnico,
     parte_por_region,
     resumen_duplicados,
@@ -1839,58 +1837,28 @@ def main() -> None:
             "el servidor no ha tomado el último cambio: *Manage app* → ⋮ → **Reboot**."
         )
 
-    # --- Localización del archivo o subida manual -------------------------
+    # --- Localización del archivo Export.csv -------------------------
     momento = ahora_colombia()
-
-    # Selector de fuente de datos
-    with st.sidebar:
-        st.divider()
-        st.subheader("📊 Fuente de datos")
-        fuente_datos = st.radio(
-            "Origen para cálculo SLA",
-            options=["Plantilla SLA (Excel)", "Export.csv (OLA)"],
-            index=0,
-            help="Plantilla SLA = seguimiento clásico con hoja PLANTILLA. "
-                 "Export.csv = OLA con vencimiento, técnico y última actualización.",
-            key="fuente_datos",
-        )
 
     origen_subido = None
     with st.sidebar:
         st.divider()
-        st.subheader("📤 Cargar archivo")
-        if fuente_datos == "Plantilla SLA (Excel)":
-            st.caption(
-                "Suba la **plantilla de seguimiento** o el **Plan de Trabajo**: el "
-                "sistema reconoce cuál es por sus hojas y lo envía a la pestaña "
-                "correcta. Se procesa en memoria; no se guarda en el servidor."
-            )
-            archivo_subido = st.file_uploader(
-                "Plantilla o Plan de Trabajo (.xlsx)",
-                type=["xlsx"],
-                key="uploader_plantilla",
-                help="Si no sube nada, se usa la plantilla que esté junto al sistema.",
-            )
-            if archivo_subido is not None:
-                origen_subido = archivo_subido
-        else:  # Export.csv (OLA)
-            st.caption(
-                "Suba el **Export.csv** con columnas: "
-                "`Fecha de vencimiento del OLA`, `Técnico.Nombre`, "
-                "`Fecha de creación` (opcional), `Hora de última actualización` (opcional)."
-            )
-            archivo_subido = st.file_uploader(
-                "Export.csv",
-                type=["csv"],
-                key="uploader_export",
-                help="Si no sube nada, se busca Export.csv local (TORRE_EXPORT_CSV).",
-            )
-            if archivo_subido is not None:
-                origen_subido = archivo_subido
+        st.subheader("📤 Cargar Export.csv")
+        st.caption(
+            "Suba el **Export.csv** con columnas: "
+            "`Fecha de vencimiento del OLA`, `Técnico.Nombre`, "
+            "`Fecha de creación` (opcional), `Hora de última actualización` (opcional)."
+        )
+        archivo_subido = st.file_uploader(
+            "Export.csv",
+            type=["csv"],
+            key="uploader_export",
+            help="Si no sube nada, se busca Export.csv local (TORRE_EXPORT_CSV).",
+        )
+        if archivo_subido is not None:
+            origen_subido = archivo_subido
 
-    hay_plantilla = False
     hay_export = False
-    plantilla_error = None
     export_error = None
 
     if origen_subido is not None:
@@ -1899,88 +1867,29 @@ def main() -> None:
 
         firma = int(hashlib.md5(contenido).hexdigest()[:8], 16)
         ruta = f"(subido) {origen_subido.name}"
-
-        if fuente_datos == "Plantilla SLA (Excel)":
-            # Reconocimiento automatico: no se le exige al usuario saber cual subir.
-            tipo = plan.reconocer_tipo(contenido)
-            st.session_state["tipo_archivo"] = tipo["tipo"]
-            st.session_state["detalle_archivo"] = tipo["detalle"]
-
-            if tipo["tipo"] == plan.TIPO_PLAN:
-                st.session_state["plan_bytes"] = contenido
-                st.session_state["plan_nombre"] = origen_subido.name
-                origen_subido = None
-            elif tipo["tipo"] == plan.TIPO_PLANTILLA:
-                st.session_state.pop("plan_bytes", None)
-                st.session_state.pop("plan_nombre", None)
-
-        hay_plantilla = (fuente_datos == "Plantilla SLA (Excel)" and origen_subido is not None)
-        hay_export = (fuente_datos == "Export.csv (OLA)" and origen_subido is not None)
+        hay_export = True
     else:
-        # Sin archivo subido: buscar local según la fuente seleccionada
-        if fuente_datos == "Plantilla SLA (Excel)":
-            try:
-                ruta = localizar_excel(os.environ.get("TORRE_EXCEL"))
-            except ErrorLecturaExcel as exc:
-                ruta = "(ninguna)"
-                lector = None
-                plantilla_error = exc
-            else:
-                hay_plantilla = True
+        # Sin archivo subido: buscar Export.csv local
+        try:
+            ruta = localizar_export_csv(os.environ.get("TORRE_EXPORT_CSV"))
+        except ErrorLecturaExcel as exc:
+            ruta = "(ninguna)"
+            export_error = exc
         else:
-            try:
-                ruta = localizar_export_csv(os.environ.get("TORRE_EXPORT_CSV"))
-            except ErrorLecturaExcel as exc:
-                ruta = "(ninguna)"
-                lector = None
-                export_error = exc
-            else:
-                hay_export = True
+            hay_export = True
 
     # --- Lectura de Datos -------------------------------------------------
     df = pd.DataFrame()
     df_completo = pd.DataFrame()
     df_crudo = None
-    nombre_archivo = "plantilla.xlsx"
+    nombre_archivo = "export.csv"
     total_hoja = total_activos = 0
     avisos = []
-
-    if hay_plantilla:
-        try:
-            with st.spinner("Leyendo la plantilla y calculando SLA..."):
-                devuelto = lector()
-                (df, df_completo, total_hoja, total_activos,
-                 dias_ventana, avisos) = devuelto[:6]
-                df_crudo = devuelto[6] if len(devuelto) > 6 else None
-                nombre_archivo = devuelto[7] if len(devuelto) > 7 else "plantilla.xlsx"
-        except ErrorLecturaExcel as exc:
-            st.error("❌ No se pudo leer el archivo Excel.")
-            st.warning(
-                "Causa más frecuente: **el archivo está abierto en Excel por otro "
-                "usuario**. Ciérrelo y pulse *Recalcular ahora*."
-            )
-            st.code(str(exc))
-            hay_plantilla = False
-        except Exception as exc:
-            st.error("❌ No se pudo procesar el archivo.")
-            tipo_info = plan.reconocer_tipo(
-                origen_subido.getvalue() if origen_subido is not None else ruta
-            )
-            st.info(
-                f"**Reconocimiento del archivo:** {tipo_info['detalle']}\n\n"
-                "Si es un **Plan de Trabajo**, ábralo en la pestaña "
-                "**🗂️ Plan de Trabajo & ANS** (se enruta solo desde el cargador). "
-                "Si es la **plantilla de seguimiento**, debe traer la hoja "
-                "`PLANTILLA`."
-            )
-            st.code(f"{type(exc).__name__}: {exc}")
-            hay_plantilla = False
 
     if hay_export:
         try:
             with st.spinner("Leyendo Export.csv y calculando SLA (OLA)..."):
                 df_crudo = leer_export_csv(ruta)
-                # calcular_tablero espera df_crudo con columnas canonicas
                 resultado = calcular_tablero(df_crudo=df_crudo)
                 df = resultado.df
                 df_completo = resultado.df_completo
@@ -2002,17 +1911,14 @@ def main() -> None:
             st.code(f"{type(exc).__name__}: {exc}")
             hay_export = False
 
-    # Si no hay ninguna fuente, mostrar mensaje
-    if not hay_plantilla and not hay_export:
+    # Si no hay fuente, mostrar mensaje
+    if not hay_export:
         st.info(
-            "**Falta la fuente de datos.** Suba la plantilla SLA (Excel) o el Export.csv "
-            "desde la barra lateral. Mientras tanto, la pestaña "
-            "**🗂️ Plan de Trabajo & ANS** sí está disponible si cargó ese archivo.",
+            "**Falta el Export.csv.** Suba el archivo desde la barra lateral. "
+            "Mientras tanto, la pestaña **🗂️ Plan de Trabajo & ANS** "
+            "sí está disponible si cargó ese archivo.",
             icon="📤",
         )
-        if plantilla_error is not None:
-            st.caption("Detalle plantilla SLA:")
-            st.code(str(plantilla_error))
         if export_error is not None:
             st.caption("Detalle Export.csv:")
             st.code(str(export_error))
@@ -2103,7 +2009,7 @@ def main() -> None:
         "🔍 Integridad de datos",
     ])
 
-    if hay_plantilla:
+    if hay_export:
         # ---------------------------------------------------------------------
         # PESTAÑA 1: 🎯 DESPACHO OPERATIVO
         # ---------------------------------------------------------------------
@@ -2389,12 +2295,14 @@ def main() -> None:
 
     else:
         st.info(
-            "**Falta la plantilla de seguimiento SLA.** Suba el archivo de seguimiento de casos (el que trae la hoja `PLANTILLA`) desde la barra lateral. Mientras tanto, la pestaña **🗂️ Plan de Trabajo & ANS** sí está disponible si cargó ese archivo.",
+            "**Falta el Export.csv.** Suba el archivo desde la barra lateral. "
+            "Mientras tanto, la pestaña **🗂️ Plan de Trabajo & ANS** "
+            "sí está disponible si cargó ese archivo.",
             icon="📤",
         )
-        if plantilla_error is not None:
-            st.caption("Detalle de la búsqueda automática:")
-            st.code(str(plantilla_error))
+        if export_error is not None:
+            st.caption("Detalle Export.csv:")
+            st.code(str(export_error))
 
     # ---------------------------------------------------------------------
     # PESTANA 5: PLAN DE TRABAJO & ANS

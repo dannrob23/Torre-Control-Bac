@@ -81,6 +81,7 @@ COL_ANS = "ANS"
 COL_ANS_INCIDENTE = "ANS INCIDENTE"
 COL_ANS_REQUERIMIENTO = "ANS REQUERIMIENTO"
 COL_CREACION = "FECHA CREACION CASO POR BANCO"
+COL_ULTIMA_ACTUALIZACION = "HORA ULTIMA ACTUALIZACION"
 
 # --- Estados del semaforo (v2, sin solapamiento) ---------------------------
 # Activos: se clasifican por tiempo restante al vencimiento.
@@ -443,7 +444,118 @@ def _validar_columnas(df: pd.DataFrame) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# Export.csv — nueva fuente de verdad (OLA)
+# ---------------------------------------------------------------------------
 
+# Mapeo de columnas del Export.csv a nombres canonicos del sistema
+MAPA_EXPORT_CSV = {
+    "Fecha de creación": COL_CREACION,
+    "Fecha de vencimiento del OLA": COL_VENCIMIENTO,
+    "Técnico.Nombre": COL_TECNICO,
+    "Hora de última actualización": COL_ULTIMA_ACTUALIZACION,
+}
+
+# Columnas requeridas en el Export.csv (nombres originales)
+COLUMNAS_EXPORT_REQUERIDAS = ("Fecha de vencimiento del OLA", "Técnico.Nombre")
+
+
+def _validar_columnas_export(df: pd.DataFrame) -> None:
+    """Verifica que el Export.csv tenga las columnas requeridas."""
+    faltantes = [c for c in COLUMNAS_EXPORT_REQUERIDAS if c not in df.columns]
+    if faltantes:
+        raise ErrorLecturaExcel(
+            "El Export.csv no tiene las columnas requeridas. Faltan: "
+            + "; ".join(repr(c) for c in faltantes)
+            + "\nColumnas encontradas: "
+            + "; ".join(repr(c) for c in df.columns)
+        )
+
+
+def localizar_export_csv(ruta: str | None = None) -> str:
+    """
+    Resuelve la ruta del Export.csv. Orden de busqueda:
+      1. ruta explicita (argumento)
+      2. variable de entorno TORRE_EXPORT_CSV
+      3. secreto de Streamlit (st.secrets["TORRE_EXPORT_CSV"])
+      4. patron *Export*.csv en carpetas habituales
+    """
+    if ruta is None:
+        ruta = os.environ.get("TORRE_EXPORT_CSV")
+
+    if ruta is None:
+        try:
+            import streamlit as st
+            if "TORRE_EXPORT_CSV" in st.secrets:
+                ruta = str(st.secrets["TORRE_EXPORT_CSV"])
+        except Exception:
+            pass
+
+    if ruta:
+        if not os.path.isfile(ruta):
+            raise ErrorLecturaExcel(f"No existe el archivo indicado: {ruta}")
+        return ruta
+
+    bases = _rutas_candidatas_excel()
+    encontrados: list[str] = []
+    for base in bases:
+        encontrados.extend(
+            f for f in glob.glob(os.path.join(base, "*Export*.csv"))
+            if not os.path.basename(f).startswith("~$")
+        )
+    if not encontrados:
+        raise ErrorLecturaExcel(
+            "No se encontro ningun Export.csv.\n"
+            "Carpetas buscadas:\n  "
+            + "\n  ".join(bases)
+            + "\n\nUbique el archivo, defina TORRE_EXPORT_CSV, "
+            "o el secreto TORRE_EXPORT_CSV en Streamlit."
+        )
+    return max(encontrados, key=os.path.getmtime)
+
+
+def leer_export_csv(ruta: str | None = None) -> pd.DataFrame:
+    """
+    Lee el Export.csv, normaliza encabezados y renombra a columnas canónicas.
+
+    Columnas esperadas en el CSV (nombres originales):
+      - Fecha de vencimiento del OLA  -> COL_VENCIMIENTO (requerida)
+      - Técnico.Nombre                -> COL_TECNICO (requerida)
+      - Fecha de creación             -> COL_CREACION (opcional)
+      - Hora de última actualización  -> COL_ULTIMA_ACTUALIZACION (opcional)
+
+    Devuelve DataFrame con columnas canónicas listas para calcular_tablero().
+    """
+    archivo = localizar_export_csv(ruta)
+    df = pd.read_csv(archivo, encoding="utf-8-sig")
+    df = _limpiar_columnas(df)
+
+    # Validar columnas requeridas ANTES de renombrar (usan nombres originales)
+    _validar_columnas_export(df)
+
+    # Renombrar a nombres canonicos
+    df = df.rename(columns=MAPA_EXPORT_CSV)
+
+    # Validar que las columnas canonicas requeridas existan tras el renombrado
+    requeridas = [COL_VENCIMIENTO, COL_TECNICO]
+    faltantes = [c for c in requeridas if c not in df.columns]
+    if faltantes:
+        raise ErrorLecturaExcel(
+            "Tras renombrar, faltan columnas canonicas: "
+            + "; ".join(repr(c) for c in faltantes)
+        )
+
+    # Asegurar tipos basicos
+    df[COL_VENCIMIENTO] = _a_datetime(df[COL_VENCIMIENTO])
+    if COL_ULTIMA_ACTUALIZACION in df.columns:
+        df[COL_ULTIMA_ACTUALIZACION] = _a_datetime(df[COL_ULTIMA_ACTUALIZACION])
+
+    log.info("Export.csv leido correctamente: %s (%d filas)", archivo, len(df))
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Duplicados de la plantilla (el mismo N° DE CASO en varias filas)
 # ---------------------------------------------------------------------------
 # Duplicados de la plantilla (el mismo N° DE CASO en varias filas)
 # ---------------------------------------------------------------------------

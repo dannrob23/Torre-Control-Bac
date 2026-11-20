@@ -15,6 +15,7 @@ Responsabilidades:
 from __future__ import annotations
 
 import glob
+import io
 import logging
 import os
 import sys
@@ -448,7 +449,7 @@ def _validar_columnas(df: pd.DataFrame) -> None:
 # Export.csv — nueva fuente de verdad (OLA)
 # ---------------------------------------------------------------------------
 
-# Mapeo de columnas del Export.csv a nombres canonicos del sistema
+# Mapeo de columnas del Export.csv (formato OLA) a nombres canonicos del sistema
 MAPA_EXPORT_CSV = {
     "Fecha de creación": COL_CREACION,
     "Fecha de vencimiento del OLA": COL_VENCIMIENTO,
@@ -456,7 +457,7 @@ MAPA_EXPORT_CSV = {
     "Hora de última actualización": COL_ULTIMA_ACTUALIZACION,
 }
 
-# Columnas requeridas en el Export.csv (nombres originales)
+# Columnas requeridas en el Export.csv (nombres originales del formato OLA)
 COLUMNAS_EXPORT_REQUERIDAS = ("Fecha de vencimiento del OLA", "Técnico.Nombre")
 
 
@@ -514,7 +515,7 @@ def localizar_export_csv(ruta: str | None = None) -> str:
     return max(encontrados, key=os.path.getmtime)
 
 
-def leer_export_csv(ruta: str | None = None) -> pd.DataFrame:
+def leer_export_csv(ruta_o_contenido: str | bytes | None = None) -> pd.DataFrame:
     """
     Lee el Export.csv, normaliza encabezados y renombra a columnas canónicas.
 
@@ -524,10 +525,38 @@ def leer_export_csv(ruta: str | None = None) -> pd.DataFrame:
       - Fecha de creación             -> COL_CREACION (opcional)
       - Hora de última actualización  -> COL_ULTIMA_ACTUALIZACION (opcional)
 
+    Acepta:
+      - str: ruta al archivo (busca con localizar_export_csv)
+      - bytes: contenido del archivo subido (ej. st.file_uploader.getvalue())
+      - None: busca Export.csv local con localizar_export_csv
+
     Devuelve DataFrame con columnas canónicas listas para calcular_tablero().
     """
-    archivo = localizar_export_csv(ruta)
-    df = pd.read_csv(archivo, encoding="utf-8-sig")
+    if isinstance(ruta_o_contenido, bytes):
+        # Contenido subido directamente (st.file_uploader.getvalue())
+        raw = io.BytesIO(ruta_o_contenido)
+        archivo = "(subido en memoria)"
+    else:
+        # Ruta en disco o None (autodescubrimiento)
+        archivo = localizar_export_csv(ruta_o_contenido)
+        raw = archivo
+
+    # Detectar delimitador automáticamente (coma o punto y coma)
+    muestra = raw.read(2048) if isinstance(raw, io.BytesIO) else open(archivo, "rb").read(2048)
+    if isinstance(muestra, bytes):
+        muestra = muestra.decode("utf-8-sig", errors="ignore")
+    # Contar comas y punto y coma en la primera línea
+    primera = muestra.splitlines()[0] if muestra else ""
+    delim = ";" if primera.count(";") > primera.count(",") else ","
+
+    # Leer CSV con el delimitador detectado
+    if isinstance(ruta_o_contenido, bytes):
+        df = pd.read_csv(io.BytesIO(ruta_o_contenido), encoding="utf-8-sig", sep=delim)
+        archivo = "(subido en memoria)"
+    else:
+        archivo = localizar_export_csv(ruta_o_contenido)
+        df = pd.read_csv(archivo, encoding="utf-8-sig", sep=delim)
+
     df = _limpiar_columnas(df)
 
     # Validar columnas requeridas ANTES de renombrar (usan nombres originales)
@@ -549,8 +578,13 @@ def leer_export_csv(ruta: str | None = None) -> pd.DataFrame:
     df[COL_VENCIMIENTO] = _a_datetime(df[COL_VENCIMIENTO])
     if COL_ULTIMA_ACTUALIZACION in df.columns:
         df[COL_ULTIMA_ACTUALIZACION] = _a_datetime(df[COL_ULTIMA_ACTUALIZACION])
+    # Asegurar columna de resolucion (puede no venir en el Export.csv)
+    if COL_RESUELTO not in df.columns:
+        df[COL_RESUELTO] = pd.NaT
+    else:
+        df[COL_RESUELTO] = _a_datetime(df[COL_RESUELTO])
 
-    log.info("Export.csv leido correctamente: %s (%d filas)", archivo, len(df))
+    log.info("Export.csv leido correctamente: %s (%d filas, delim='%s')", archivo, len(df), delim)
     return df
 
 
@@ -721,11 +755,21 @@ def formatear_duracion(horas: float | None) -> str:
     """
     Convierte horas decimales a texto legible.
     Ej: 4.42 -> '4 h 25 min'    |    -3.5 -> '3 h 30 min'
+    Para valores >= 24h muestra en días: 218 h -> '9 d 2 h'
     """
     if horas is None or pd.isna(horas):
         return "—"
     total_minutos = int(round(abs(horas) * 60))
     horas_ent, minutos = divmod(total_minutos, 60)
+    if horas_ent >= 24:
+        dias, horas_rest = divmod(horas_ent, 24)
+        if horas_rest and minutos:
+            return f"{dias} d {horas_rest} h {minutos} min"
+        if horas_rest:
+            return f"{dias} d {horas_rest} h"
+        if minutos:
+            return f"{dias} d {minutos} min"
+        return f"{dias} d"
     if horas_ent and minutos:
         return f"{horas_ent} h {minutos} min"
     if horas_ent:

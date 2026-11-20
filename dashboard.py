@@ -62,6 +62,7 @@ from core import (
     ahora_colombia,
     calcular_tablero,
     leer_export_csv,
+    localizar_export_csv,
     metricas_por_tecnico,
     parte_por_region,
     resumen_duplicados,
@@ -1860,12 +1861,13 @@ def main() -> None:
 
     hay_export = False
     export_error = None
+    export_contenido = None
 
     if origen_subido is not None:
-        contenido = origen_subido.getvalue()
+        export_contenido = origen_subido.getvalue()
         import hashlib
 
-        firma = int(hashlib.md5(contenido).hexdigest()[:8], 16)
+        firma = int(hashlib.md5(export_contenido).hexdigest()[:8], 16)
         ruta = f"(subido) {origen_subido.name}"
         hay_export = True
     else:
@@ -1889,7 +1891,7 @@ def main() -> None:
     if hay_export:
         try:
             with st.spinner("Leyendo Export.csv y calculando SLA (OLA)..."):
-                df_crudo = leer_export_csv(ruta)
+                df_crudo = leer_export_csv(export_contenido if export_contenido else ruta)
                 resultado = calcular_tablero(df_crudo=df_crudo)
                 df = resultado.df
                 df_completo = resultado.df_completo
@@ -1898,6 +1900,31 @@ def main() -> None:
                 dias_ventana = resultado.dias_ventana
                 avisos = resultado.warnings
                 nombre_archivo = os.path.basename(ruta)
+
+        # Asegurar columnas que espera COLUMNAS_TABLA (plantilla) en datos OLA
+                for marco in (df, df_completo):
+                    if not marco.empty:
+                        if COL_CASO not in marco.columns:
+                            # Usar ID de la solicitud como N° DE CASO
+                            if "ID de la solicitud" in marco.columns:
+                                marco[COL_CASO] = marco["ID de la solicitud"]
+                            else:
+                                marco[COL_CASO] = ""
+                        if COL_CIUDAD not in marco.columns:
+                            # Usar nombre de ubicación como OFICINA
+                            if "Nombre de la ubicación.Nombre de la ubicación" in marco.columns:
+                                marco[COL_CIUDAD] = marco["Nombre de la ubicación.Nombre de la ubicación"]
+                            else:
+                                marco[COL_CIUDAD] = ""
+                        if COL_REGIONAL not in marco.columns:
+                            # Usar categoría de ubicación como REGIONAL
+                            if "Categoría de la ubicación" in marco.columns:
+                                marco[COL_REGIONAL] = marco["Categoría de la ubicación"]
+                            else:
+                                marco[COL_REGIONAL] = ""
+                        if COL_DEPARTAMENTO not in marco.columns:
+                            marco[COL_DEPARTAMENTO] = ""
+
         except ErrorLecturaExcel as exc:
             st.error("❌ No se pudo leer el Export.csv.")
             st.warning(

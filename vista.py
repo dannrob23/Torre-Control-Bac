@@ -32,6 +32,7 @@ from core import (
     COL_CASO,
     COL_CIUDAD,
     COL_ES_DUPLICADO,
+    COL_ULTIMA_ACTUALIZACION,
     DUPLICADO,
     ICONO_ESTADO,
     ahora_colombia,

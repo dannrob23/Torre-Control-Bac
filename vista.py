@@ -479,9 +479,20 @@ def fila_accion_html(fila: pd.Series) -> str:
     oficina = str(fila.get(COL_CIUDAD, "") or "").strip() or "(sin oficina)"
     region = str(fila.get("REGION_TECNICO", "") or "").strip()
 
+    # Última actualización documentada del caso
+    upd = fila.get(COL_ULTIMA_ACTUALIZACION)
+    if pd.notna(upd):
+        try:
+            upd_str = str(pd.Timestamp(upd))[:16]  # YYYY-MM-DD HH:MM
+        except Exception:
+            upd_str = str(upd)[:16]
+    else:
+        upd_str = "Sin actualizar"
+
     contexto = f"{tecnico} · {oficina}"
     if region and region != "SIN REGION":
         contexto += f" · {region}"
+    contexto += f" · Última act.: {upd_str}"
 
     return (
         f"<div class='fila-accion-card {_clase_fondo(estado)}'>"

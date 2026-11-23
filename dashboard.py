@@ -237,6 +237,7 @@ COLUMNAS_TABLA = {
     COL_REGIONAL: "Regional",
     COL_DEPARTAMENTO: "Departamento",
     COL_VENCIMIENTO: "Vencimiento",
+    COL_ULTIMA_ACTUALIZACION: "Ultima actualizacion",
     "TIEMPO_RESTANTE": "Tiempo restante",
     "TIEMPO_VENCIDO": "Tiempo vencido",
     "HORAS_RESTANTES": "Horas restantes",
@@ -2228,6 +2229,11 @@ def main() -> None:
                 visible["Vencimiento"] = (
                     venc.dt.strftime("%Y-%m-%d %H:%M").fillna("Sin fecha de vencimiento")
                 )
+                if "Ultima actualizacion" in visible.columns:
+                    upd = pd.to_datetime(visible["Ultima actualizacion"], errors="coerce")
+                    visible["Ultima actualizacion"] = (
+                        upd.dt.strftime("%Y-%m-%d %H:%M").fillna("Sin actualizar")
+                    )
                 for col_txt in ("Ciudad", "Tecnico", "Caso", "Regional", "Departamento"):
                     if col_txt in visible.columns:
                         visible[col_txt] = visible[col_txt].astype(str)

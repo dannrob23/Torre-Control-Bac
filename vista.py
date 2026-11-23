@@ -720,6 +720,7 @@ def _csv_lista(df: pd.DataFrame) -> bytes:
         ("TIEMPO_VENCIDO", "Tiempo vencido"),
         ("TIEMPO_RESTANTE", "Tiempo restante"),
         ("FECHA_VENCIMIENTO", "Vencimiento"),
+        (COL_ULTIMA_ACTUALIZACION, "Ultima actualizacion"),
         ("TECNICO", "Tecnico"),
         ("REGION_TECNICO", "Region"),
         (COL_CIUDAD, "Oficina"),

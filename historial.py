@@ -64,6 +64,24 @@ CREATE INDEX IF NOT EXISTS idx_notif_caso    ON notificaciones (caso);
 CREATE INDEX IF NOT EXISTS idx_notif_fecha   ON notificaciones (fecha_hora);
 CREATE INDEX IF NOT EXISTS idx_notif_tecnico ON notificaciones (tecnico);
 CREATE INDEX IF NOT EXISTS idx_notif_estado  ON notificaciones (estado);
+
+CREATE TABLE IF NOT EXISTS rendimiento_mensual_tecnico (
+    mes                   TEXT    NOT NULL,      -- YYYY-MM
+    tecnico               TEXT    NOT NULL,
+    region                TEXT,
+    casos_asignados       INTEGER DEFAULT 0,
+    casos_cerrados        INTEGER DEFAULT 0,
+    casos_cerrados_tiempo INTEGER DEFAULT 0,
+    casos_cerrados_tarde  INTEGER DEFAULT 0,
+    casos_vencidos_abiertos INTEGER DEFAULT 0,
+    cumplimiento_pct      REAL,
+    casos_documentados    INTEGER DEFAULT 0,     -- con ultima_actualizacion
+    casos_sin_documentar  INTEGER DEFAULT 0,     -- sin ultima_actualizacion
+    fecha_snapshot        TEXT    NOT NULL,
+    PRIMARY KEY (mes, tecnico)
+);
+CREATE INDEX IF NOT EXISTS idx_rend_mes      ON rendimiento_mensual_tecnico (mes);
+CREATE INDEX IF NOT EXISTS idx_rend_tecnico  ON rendimiento_mensual_tecnico (tecnico);
 """
 
 
@@ -450,6 +468,119 @@ class Historial:
         except sqlite3.Error as exc:
             log.error("No se pudo purgar el historial: %s", exc)
             return 0
+
+    # ------------------------------------------------------------------
+    # Rendimiento mensual por tecnico (trazabilidad y persistencia)
+    # ------------------------------------------------------------------
+
+    def guardar_rendimiento_mensual(self, mes: str, filas: list[dict]) -> int:
+        """
+        Guarda o reemplaza el snapshot de rendimiento mensual por tecnico.
+
+        Args:
+            mes: 'YYYY-MM'
+            filas: lista de dict con claves:
+                   tecnico, region, casos_asignados, casos_cerrados,
+                   casos_cerrados_tiempo, casos_cerrados_tarde,
+                   casos_vencidos_abiertos, cumplimiento_pct,
+                   casos_documentados, casos_sin_documentar
+
+        Devuelve cuantas filas se guardaron (insert/replace por PK mes+tecnico).
+        """
+        momento = ahora_colombia().strftime("%Y-%m-%d %H:%M:%S")
+        guardadas = 0
+        try:
+            with self._conexion() as cx:
+                for f in filas:
+                    cx.execute(
+                        """INSERT INTO rendimiento_mensual_tecnico
+                           (mes, tecnico, region, casos_asignados, casos_cerrados,
+                            casos_cerrados_tiempo, casos_cerrados_tarde,
+                            casos_vencidos_abiertos, cumplimiento_pct,
+                            casos_documentados, casos_sin_documentar, fecha_snapshot)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           ON CONFLICT(mes, tecnico) DO UPDATE SET
+                           region=excluded.region,
+                           casos_asignados=excluded.casos_asignados,
+                           casos_cerrados=excluded.casos_cerrados,
+                           casos_cerrados_tiempo=excluded.casos_cerrados_tiempo,
+                           casos_cerrados_tarde=excluded.casos_cerrados_tarde,
+                           casos_vencidos_abiertos=excluded.casos_vencidos_abiertos,
+                           cumplimiento_pct=excluded.cumplimiento_pct,
+                           casos_documentados=excluded.casos_documentados,
+                           casos_sin_documentar=excluded.casos_sin_documentar,
+                           fecha_snapshot=excluded.fecha_snapshot""",
+                        (
+                            mes,
+                            str(f.get("tecnico", "")),
+                            str(f.get("region", "")),
+                            int(f.get("casos_asignados", 0)),
+                            int(f.get("casos_cerrados", 0)),
+                            int(f.get("casos_cerrados_tiempo", 0)),
+                            int(f.get("casos_cerrados_tarde", 0)),
+                            int(f.get("casos_vencidos_abiertos", 0)),
+                            f.get("cumplimiento_pct"),
+                            int(f.get("casos_documentados", 0)),
+                            int(f.get("casos_sin_documentar", 0)),
+                            momento,
+                        ),
+                    )
+                    guardadas += 1
+        except sqlite3.Error as exc:
+            log.error("No se pudo guardar rendimiento mensual: %s", exc)
+        return guardadas
+
+    def leer_rendimiento_mensual(
+        self, mes: str | None = None, tecnico: str | None = None
+    ) -> pd.DataFrame:
+        """
+        Lee snapshots de rendimiento mensual.
+
+        Args:
+            mes: 'YYYY-MM' o None para todos los meses.
+            tecnico: nombre de tecnico o None para todos.
+
+        Devuelve DataFrame ordenado por mes DESC, tecnico.
+        """
+        condiciones = []
+        parametros: list[str] = []
+        if mes:
+            condiciones.append("mes = ?")
+            parametros.append(mes)
+        if tecnico:
+            condiciones.append("tecnico = ?")
+            parametros.append(tecnico)
+
+        consulta = "SELECT * FROM rendimiento_mensual_tecnico"
+        if condiciones:
+            consulta += " WHERE " + " AND ".join(condiciones)
+        consulta += " ORDER BY mes DESC, tecnico"
+
+        try:
+            with self._conexion() as cx:
+                return pd.read_sql_query(consulta, cx, params=parametros)
+        except (sqlite3.Error, pd.errors.DatabaseError) as exc:
+            log.error("No se pudo leer rendimiento mensual: %s", exc)
+            return pd.DataFrame(
+                columns=[
+                    "mes", "tecnico", "region", "casos_asignados", "casos_cerrados",
+                    "casos_cerrados_tiempo", "casos_cerrados_tarde",
+                    "casos_vencidos_abiertos", "cumplimiento_pct",
+                    "casos_documentados", "casos_sin_documentar", "fecha_snapshot",
+                ]
+            )
+
+    def leer_meses_disponibles(self) -> list[str]:
+        """Devuelve lista de meses (YYYY-MM) con snapshots guardados, mas reciente primero."""
+        try:
+            with self._conexion() as cx:
+                filas = cx.execute(
+                    "SELECT DISTINCT mes FROM rendimiento_mensual_tecnico ORDER BY mes DESC"
+                ).fetchall()
+            return [str(f["mes"]) for f in filas]
+        except sqlite3.Error as exc:
+            log.error("No se pudo leer meses disponibles: %s", exc)
+            return []
 
 
 def _a_float(valor) -> float | None:

@@ -1210,6 +1210,89 @@ def metricas_por_tecnico(df_completo: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def rendimiento_por_tecnico(df_completo: pd.DataFrame) -> pd.DataFrame:
+    """
+    Rendimiento por tecnico con trazabilidad de documentacion.
+
+    Incluye:
+      - Casos asignados, cerrados, cerrados a tiempo, cerrados tarde,
+        vencidos abiertos.
+      - Casos documentados (tienen Hora de ultima actualizacion) vs sin documentar.
+      - Cumplimiento % = cerrados a tiempo / cerrados totales.
+
+    Columnas:
+        TECNICO, REGION, CASOS_ASIGNADOS, CASOS_CERRADOS,
+        CASOS_CERRADOS_TIEMPO, CASOS_CERRADOS_TARDE,
+        CASOS_VENCIDOS_ABIERTOS, CUMPLIMIENTO_PCT,
+        CASOS_DOCUMENTADOS, CASOS_SIN_DOCUMENTAR, DOCUMENTACION_PCT
+    """
+    if df_completo is None or df_completo.empty:
+        return pd.DataFrame(
+            columns=[
+                "TECNICO", "REGION", "CASOS_ASIGNADOS", "CASOS_CERRADOS",
+                "CASOS_CERRADOS_TIEMPO", "CASOS_CERRADOS_TARDE",
+                "CASOS_VENCIDOS_ABIERTOS", "CUMPLIMIENTO_PCT",
+                "CASOS_DOCUMENTADOS", "CASOS_SIN_DOCUMENTAR", "DOCUMENTACION_PCT",
+            ]
+        )
+
+    m = df_completo.copy()
+    if COL_ES_DUPLICADO in m.columns:
+        m = m[~m[COL_ES_DUPLICADO].fillna(False).astype(bool)]
+    m["_abierto"] = ~m["CERRADO"]
+
+    filas = []
+    for tecnico, grupo in m.groupby("TECNICO", dropna=False):
+        cerrados = grupo[~grupo["_abierto"]]
+        cerrados_tiempo = cerrados[cerrados["ESTADO"] == CERRADO_OK]
+        cerrados_tarde = cerrados[cerrados["ESTADO"] == CERRADO_TARDE]
+        abiertos = grupo[grupo["_abierto"]]
+        vencidos_abiertos = abiertos[abiertos["ESTADO"] == ROJO]
+
+        # Documentacion: casos que tienen Hora de ultima actualizacion
+        col_upd = COL_ULTIMA_ACTUALIZACION
+        if col_upd in grupo.columns:
+            documentados = grupo[grupo[col_upd].notna()]
+            sin_documentar = grupo[grupo[col_upd].isna()]
+        else:
+            documentados = grupo.iloc[0:0]
+            sin_documentar = grupo
+
+        doc_pct = (
+            round(len(documentados) / len(grupo) * 100, 1) if len(grupo) else 0.0
+        )
+
+        filas.append(
+            {
+                "TECNICO": tecnico if tecnico else "(sin tecnico)",
+                "REGION": grupo["REGION_TECNICO"].mode().iloc[0]
+                if not grupo["REGION_TECNICO"].mode().empty
+                else REGION_DESCONOCIDA,
+                "CASOS_ASIGNADOS": int(len(grupo)),
+                "CASOS_CERRADOS": int(len(cerrados)),
+                "CASOS_CERRADOS_TIEMPO": int(len(cerrados_tiempo)),
+                "CASOS_CERRADOS_TARDE": int(len(cerrados_tarde)),
+                "CASOS_VENCIDOS_ABIERTOS": int(len(vencidos_abiertos)),
+                "CUMPLIMIENTO_PCT": round(
+                    len(cerrados_tiempo) / len(cerrados) * 100, 1
+                ) if len(cerrados) else None,
+                "CASOS_DOCUMENTADOS": int(len(documentados)),
+                "CASOS_SIN_DOCUMENTAR": int(len(sin_documentar)),
+                "DOCUMENTACION_PCT": doc_pct,
+            }
+        )
+
+    tabla = pd.DataFrame(filas)
+    if tabla.empty:
+        return tabla
+    tabla["_sin_asignar"] = (tabla["TECNICO"] == "(sin tecnico)").astype(int)
+    return (
+        tabla.sort_values(["_sin_asignar", "CUMPLIMIENTO_PCT"], ascending=[True, False])
+        .drop(columns=["_sin_asignar"])
+        .reset_index(drop=True)
+    )
+
+
 def construir_mensaje_notificacion(fila: pd.Series) -> tuple[str, str]:
     """Devuelve (titulo, cuerpo) del aviso de escritorio para un caso."""
     estado = fila.get("ESTADO", "")

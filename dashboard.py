@@ -66,6 +66,7 @@ from core import (
     localizar_export_csv,
     metricas_por_tecnico,
     parte_por_region,
+    rendimiento_por_tecnico,
     resumen_duplicados,
 )
 from historial import (
@@ -536,14 +537,24 @@ def ranking(
 def render_metricas_por_tecnico(df_completo: pd.DataFrame, momento: datetime) -> None:
     """
     Dibuja la tabla de metricas por tecnico, los rankings de gestion, la tasa de
-    cumplimiento, la matriz Tecnico x Estado y la descarga CSV.
+    cumplimiento, la matriz Tecnico x Estado, la trazabilidad de documentacion
+    (Ultima actualizacion) y el rendimiento mensual persistente en SQLite.
     """
+    # --- Metricas base (ventana actual) ------------------------------------
     tabla_metricas = metricas_por_tecnico(df_completo)
     if tabla_metricas is None or tabla_metricas.empty:
         st.info("No hay casos en la plantilla para calcular metricas por tecnico.")
         return
 
-    # --- Tabla completa de metricas + descarga CSV (punto i) -------------
+    # --- Rendimiento con documentacion (Ultima actualizacion) --------------
+    tabla_rendimiento = rendimiento_por_tecnico(df_completo)
+
+    # --- Historial (SQLite) para persistencia mensual ----------------------
+    historial = Historial()
+    mes_actual = momento.strftime("%Y-%m")
+
+    # --- A) Tabla completa de metricas base --------------------------------
+    st.markdown("### 📊 Métricas por Técnico (vista actual)")
     st.dataframe(
         tabla_metricas_visible(tabla_metricas),
         width="stretch",
@@ -558,11 +569,113 @@ def render_metricas_por_tecnico(df_completo: pd.DataFrame, momento: datetime) ->
         key="descarga_metricas",
     )
     st.caption(
-        "En el CSV, CUMPLIMIENTO_PCT vacio = tecnico sin casos cerrados "
+        "CUMPLIMIENTO_PCT vacio = tecnico sin casos cerrados "
         "(no se puede calcular el porcentaje)."
     )
 
-    # --- d) e) f) Rankings ------------------------------------------------
+    # --- B) Documentacion segun Ultima actualizacion -----------------------
+    st.markdown("### 📋 Documentacion de Casos (según Última Actualizacion)")
+    st.caption(
+        "Muestra cuántos casos de cada tecnico tienen fecha de "
+        "'Hora de última actualización' documentada vs sin documentar."
+    )
+    st.dataframe(
+        tabla_metricas_visible(tabla_rendimiento),
+        width="stretch",
+        hide_index=True,
+        height=min(500, 40 + 35 * len(tabla_rendimiento)),
+    )
+    st.download_button(
+        "⬇️ Descargar documentacion por tecnico (CSV)",
+        data=tabla_rendimiento.to_csv(index=False, na_rep="").encode("utf-8-sig"),
+        file_name=f"documentacion_por_tecnico_{momento:%Y%m%d_%H%M}.csv",
+        mime="text/csv",
+        key="descarga_documentacion",
+    )
+
+    # --- C) Guardar snapshot mensual en SQLite (persistencia) --------------
+    st.markdown("### 💾 Rendimiento Mensual (Persistido en SQLite)")
+    st.caption(
+        "Cada vez que se recalcula se guarda un snapshot del mes actual en "
+        "la base de datos SQLite. Los datos no se pierden al cambiar el "
+        "Export.csv: se puede consultar el historial mes a mes."
+    )
+
+    # Preparar filas para guardar desde tabla_rendimiento
+    filas_snapshot = []
+    for _, fila in tabla_rendimiento.iterrows():
+        filas_snapshot.append(
+            {
+                "tecnico": fila["TECNICO"],
+                "region": fila["REGION"],
+                "casos_asignados": int(fila["CASOS_ASIGNADOS"]),
+                "casos_cerrados": int(fila["CASOS_CERRADOS"]),
+                "casos_cerrados_tiempo": int(fila["CASOS_CERRADOS_TIEMPO"]),
+                "casos_cerrados_tarde": int(fila["CASOS_CERRADOS_TARDE"]),
+                "casos_vencidos_abiertos": int(fila["CASOS_VENCIDOS_ABIERTOS"]),
+                "cumplimiento_pct": fila["CUMPLIMIENTO_PCT"],
+                "casos_documentados": int(fila["CASOS_DOCUMENTADOS"]),
+                "casos_sin_documentar": int(fila["CASOS_SIN_DOCUMENTAR"]),
+            }
+        )
+
+    if filas_snapshot:
+        guardadas = historial.guardar_rendimiento_mensual(mes_actual, filas_snapshot)
+        st.success(
+            f"✅ Snapshot del mes **{mes_actual}** guardado en SQLite "
+            f"({guardadas} tecnicos)."
+        )
+
+    # --- D) Selector de mes y reporte historico ----------------------------
+    meses_disponibles = historial.leer_meses_disponibles()
+    col_mes, col_refrescar = st.columns([3, 1])
+    with col_mes:
+        mes_seleccionado = st.selectbox(
+            "📅 Ver reporte de mes",
+            options=meses_disponibles if meses_disponibles else [mes_actual],
+            index=0,
+            key="selector_mes_rendimiento",
+            help="Seleccione un mes para ver el rendimiento historico guardado en SQLite.",
+        )
+    with col_refrescar:
+        st.write("")
+        if st.button("🔄 Refrescar meses", key="refrescar_meses_rendimiento"):
+            meses_disponibles = historial.leer_meses_disponibles()
+            st.rerun()
+
+    if meses_disponibles:
+        df_mes = historial.leer_rendimiento_mensual(mes=mes_seleccionado)
+        if not df_mes.empty:
+            # Formatear para mostrar
+            df_mes_visible = df_mes.copy()
+            if "cumplimiento_pct" in df_mes_visible.columns:
+                df_mes_visible["cumplimiento_pct"] = df_mes_visible[
+                    "cumplimiento_pct"
+                ].apply(lambda v: "—" if pd.isna(v) else f"{float(v):.1f} %")
+
+            st.markdown(f"#### Rendimiento de {mes_seleccionado}")
+            st.dataframe(
+                df_mes_visible[
+                    [
+                        "tecnico", "region", "casos_asignados", "casos_cerrados",
+                        "casos_cerrados_tiempo", "casos_cerrados_tarde",
+                        "casos_vencidos_abiertos", "cumplimiento_pct",
+                        "casos_documentados", "casos_sin_documentar",
+                    ]
+                ],
+                width="stretch",
+                hide_index=True,
+                height=min(500, 40 + 35 * len(df_mes_visible)),
+            )
+            st.download_button(
+                f"⬇️ Descargar reporte {mes_seleccionado} (CSV)",
+                data=df_mes.to_csv(index=False, na_rep="").encode("utf-8-sig"),
+                file_name=f"rendimiento_mensual_{mes_seleccionado}.csv",
+                mime="text/csv",
+                key=f"descarga_rendimiento_{mes_seleccionado}",
+            )
+
+    # --- E) Rankings (mantener los existentes) -----------------------------
     st.markdown("##### 🏆 Rankings de carga y riesgo")
     r1, r2, r3 = st.columns(3)
     with r1:
@@ -603,7 +716,7 @@ def render_metricas_por_tecnico(df_completo: pd.DataFrame, momento: datetime) ->
             height=440,
         )
 
-    # --- g) Tasa de cumplimiento (peor primero) ---------------------------
+    # --- F) Tasa de cumplimiento (peor primero) ----------------------------
     st.markdown("##### ✅ Tasa de cumplimiento por tecnico (peor primero)")
     cumplimiento = tabla_metricas.sort_values(
         "CUMPLIMIENTO_PCT", ascending=True, na_position="last"
@@ -619,7 +732,7 @@ def render_metricas_por_tecnico(df_completo: pd.DataFrame, momento: datetime) ->
         "'—' = tecnico sin casos cerrados."
     )
 
-    # --- h) Matriz Tecnico x Estado ---------------------------------------
+    # --- G) Matriz Tecnico x Estado ----------------------------------------
     st.markdown("##### 🧮 Matriz Tecnico x Estado")
     matriz = pd.crosstab(df_completo["TECNICO"], df_completo["ESTADO"])
     matriz = (
